@@ -1,16 +1,26 @@
-# React + Vite
+# ChinhAnh — LK Magic Web Studio
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Ứng dụng web chỉnh sửa ảnh Studio tối (Dark UI) chạy trực tiếp trên trình duyệt (React + Vite + Tailwind CSS + HTML5 Canvas + `@imgly/background-removal`).
 
-Currently, two official plugins are available:
+## Tính năng chính
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Chỉnh màu sắc & Preset Studio:** 8 preset màu (Studio Trong Trẻo, Cưới Hàn Quốc, Nắng Ấm, Film Cổ Điển, Chân Dung Sáng Da, Tông Lạnh, Đen Trắng) và 10 thanh trượt chi tiết (Exposure, Contrast, Highlights, Shadows, Temp, Tint, Saturation, Vibrance, Sharpen, Vignette).
+- **Chỉnh chân dung (Portrait Retouch):** Làm mịn da tự động giữ chi tiết mắt/tóc, làm sáng da, hồng hào, kèm cọ mịn da và cọ xóa mụn/khuyết điểm thủ công.
+- **Nắn bóp thủ công (Liquify):** Đẩy (Push), Thu nhỏ (Pinch), Phóng to (Bloat) và Khôi phục vùng.
+- **Xóa vật thể thừa:** Tô xóa tự động (Exemplar Patch Inpainting) và Nhân bản vùng (Clone Stamp).
+- **Tách nền AI & Hậu cảnh:** Tách nền tự động ngay trên trình duyệt bằng `@imgly/background-removal`, hỗ trợ nền trong suốt (PNG), xóa phông Bokeh, nền màu đơn sắc và ghép ảnh nền.
+- **Cắt, xoay, lật & Chữ/Khung viền:** Cắt theo tỷ lệ chuẩn, xoay 90°, lật ngang/dọc, thêm chữ watermark, khung viền và xuất ảnh JPG / PNG / WebP.
+- **Công cụ Studio:** Kéo thả nhiều ảnh (Filmstrip), Zoom/Pan, chia đôi Trước/Sau, giữ để xem ảnh gốc, Undo/Redo (`Ctrl+Z` / `Ctrl+Y`).
 
-## React Compiler
+## Cài đặt & chạy
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npm run dev
+```
 
-## Expanding the Oxlint configuration
+Build production:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```bash
+npm run build
+```
