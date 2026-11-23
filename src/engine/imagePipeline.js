@@ -493,8 +493,10 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
         let effSat = satFactor;
         if (vibAmount !== 0) {
-          const maxC = Math.max(r, g, b);
-          const minC = Math.min(r, g, b);
+          // Measure saturation on displayable values: channels pushed below 0 by
+          // earlier steps would otherwise make (max - min) / max blow up.
+          const maxC = clamp(Math.max(r, g, b));
+          const minC = clamp(Math.min(r, g, b));
           const curSat = maxC > 0 ? (maxC - minC) / maxC : 0;
           effSat += vibAmount * (1 - curSat);
         }

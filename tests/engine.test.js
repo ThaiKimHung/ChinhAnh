@@ -142,3 +142,14 @@ test('inpaintMaskedRegion fills masked pixels and applyCloneStampStroke copies s
   applyCloneStampStroke(cloneImg, 12, 12, -10, -10, 4, 1.0);
   assert.equal(cloneImg.data[(12 * 20 + 12) * 4], 220);
 });
+
+test('vibrance keeps near-black pixels neutral when earlier steps push channels below zero', () => {
+  const img = new ImageData(new Uint8ClampedArray([40, 39, 39, 255]), 1, 1);
+  const adj = {
+    ...DEFAULT_ADJUSTMENTS,
+    exposure: -15, contrast: 20, highlights: 30, shadows: -20, temperature: -25, tint: 15, saturation: -20, vibrance: 45,
+  };
+  const [r, g, b] = processImagePipeline(img, adj, DEFAULT_BEAUTY).data;
+  // A dark grey must stay dark and nearly neutral; it used to become pure yellow (255, 255, 0).
+  assert.ok(Math.max(r, g, b) < 80 && Math.max(r, g, b) - Math.min(r, g, b) < 40, `got ${r},${g},${b}`);
+});
