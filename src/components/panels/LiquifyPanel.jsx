@@ -1,0 +1,78 @@
+import React from 'react';
+import { Wand2, Move, Maximize2, Minimize2, Undo } from 'lucide-react';
+import { SliderRow } from './controls';
+
+export default function LiquifyPanel({
+  brushSize,
+  setBrushSize,
+  brushStrength,
+  setBrushStrength,
+  liquifyMode,
+  setLiquifyMode,
+  onResetLiquify,
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+          Nắn bóp khuôn mặt &amp; dáng
+        </h3>
+        <button
+          onClick={onResetLiquify}
+          title="Đưa mọi chỉnh sửa trực tiếp trên pixel về ảnh gốc"
+          className="text-[11px] text-slate-400 hover:text-rose-400 cursor-pointer"
+        >
+          Khôi phục pixel toàn ảnh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          { id: 'push', label: 'Đẩy (Bóp mặt/eo)', icon: Move },
+          { id: 'pinch', label: 'Thu nhỏ', icon: Minimize2 },
+          { id: 'bloat', label: 'Phóng to (Mắt/Môi)', icon: Maximize2 },
+          { id: 'restore', label: 'Khôi phục vùng', icon: Undo },
+        ].map((m) => {
+          const Icon = m.icon;
+          const active = liquifyMode === m.id;
+          return (
+            <button
+              key={m.id}
+              onClick={() => setLiquifyMode(m.id)}
+              className={`p-2.5 rounded-xl border text-xs font-medium flex items-center gap-2 transition cursor-pointer ${
+                active
+                  ? 'bg-amber-500/15 border-amber-500 text-amber-300'
+                  : 'bg-[#1b1f29] border-[#262c3b] text-slate-300 hover:bg-[#222736]'
+              }`}
+            >
+              <Icon className="w-4 h-4 shrink-0" />
+              <span className="truncate">{m.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <SliderRow
+        label="Kích thước vùng nắn ( [ / ] )"
+        min={15}
+        max={180}
+        value={brushSize}
+        onChange={setBrushSize}
+        onReset={() => setBrushSize(55)}
+      />
+      <SliderRow
+        label="Cường độ nắn"
+        min={10}
+        max={100}
+        value={brushStrength}
+        onChange={setBrushStrength}
+        onReset={() => setBrushStrength(55)}
+      />
+
+      <div className="text-[11px] text-slate-400 bg-[#1b1f29] p-3 rounded-xl border border-[#262c3b] leading-relaxed">
+        <Wand2 className="w-3.5 h-3.5 text-amber-400 inline mr-1.5" />
+        Kéo nhẹ trên ảnh để bóp gọn hàm, chỉnh mũi, nâng vai hoặc chỉnh dáng tự nhiên.
+      </div>
+    </div>
+  );
+}

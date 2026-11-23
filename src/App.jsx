@@ -1,18 +1,15 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { X } from 'lucide-react';
 import TopBar from './components/TopBar';
 import LeftNav from './components/LeftNav';
 import RightPanel from './components/RightPanel';
 import CanvasStage from './components/CanvasStage';
 import ExportModal from './components/ExportModal';
+import Filmstrip from './components/Filmstrip';
 import samplePortraitUrl from './assets/studio-portrait-sample.jpg';
-import { hydrateSession, loadDraft, saveDraft, serializeSession } from './engine/drafts';
 import { createImageJobGuard } from './engine/imageJobs';
 import { advanceBrushStroke, createBrushStroke, finishBrushStroke } from './engine/brushStroke';
 import { inpaintInWorker } from './engine/inpaintJob';
-import { applyCutoutMatte } from './engine/cutout';
 import {
-  buildOriginalSource,
   createZip,
   downloadBlob,
   encodeCanvas,
@@ -30,118 +27,36 @@ import {
   DEFAULT_TEXT,
   DEFAULT_LOGO,
   DEFAULT_FRAME,
-  processImagePipeline,
   applyLiquifyStroke,
   applySkinBrushStroke,
   applyAlphaMaskBrushStroke,
   computeAutoEnhance,
   computeHistogram,
-  compositeWithBackground,
-  renderTextAndFrame,
   generateIdPhotoSheetCanvas,
 } from './engine/imagePipeline';
 import { applyCloneStampStroke } from './engine/inpaint';
-
-const CUSTOM_PRESETS_KEY = 'lkmagic_custom_presets_v1';
-const DRAFT_HISTORY_LIMIT = 6;
-
-function cloneImageData(imgData) {
-  return new ImageData(new Uint8ClampedArray(imgData.data), imgData.width, imgData.height);
-}
-
-function imageDataToCanvas(imgData) {
-  const c = document.createElement('canvas');
-  c.width = imgData.width;
-  c.height = imgData.height;
-  c.getContext('2d', { willReadFrequently: true }).putImageData(imgData, 0, 0);
-  return c;
-}
-
-function readImage(url) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Không thể đọc tệp ảnh.'));
-    image.src = url;
-  });
-}
-
-function canvasToBlob(canvas, format) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error('Không thể tạo tệp ảnh.'));
-    }, format);
-  });
-}
-
-function imageSizeOf(image) {
-  return { width: image.naturalWidth, height: image.naturalHeight };
-}
-
-function workingSizeOf(size, maxDimension) {
-  const limit = maxDimension || (isSupportedCanvasSize(size) ? 0 : 2400);
-  const scale = limit ? Math.min(1, limit / Math.max(size.width, size.height)) : 1;
-  return {
-    width: Math.max(1, Math.round(size.width * scale)),
-    height: Math.max(1, Math.round(size.height * scale)),
-  };
-}
-
-function renderCompositeCanvas({
-  workData,
-  origCanvas,
-  cutoutAlpha,
-  adjustments,
-  beauty,
-  bgState,
-  textConfig,
-  frameConfig,
-  logoConfig,
-  resolutionScale = 1,
-}) {
-  const processed = processImagePipeline(workData, adjustments, beauty);
-  const fgCanvas = document.createElement('canvas');
-  fgCanvas.width = processed.width;
-  fgCanvas.height = processed.height;
-  const fgCtx = fgCanvas.getContext('2d');
-
-  const useCutout =
-    cutoutAlpha &&
-    bgState.mode !== 'original' &&
-    cutoutAlpha.length === processed.width * processed.height;
-
-  if (useCutout) {
-    applyCutoutMatte(processed, cutoutAlpha, {
-      feather: bgState.feather ?? 0,
-      resolutionScale,
-      decontaminate: bgState.decontaminate !== false,
-    });
-  }
-
-  fgCtx.putImageData(processed, 0, 0);
-
-  let finalCanvas = fgCanvas;
-  if (useCutout) {
-    const backdropSrc = bgState.mode === 'bokeh' ? imageDataToCanvas(workData) : origCanvas;
-    finalCanvas = compositeWithBackground(fgCanvas, backdropSrc, bgState, resolutionScale);
-  }
-
-  const outCtx = finalCanvas.getContext('2d');
-  renderTextAndFrame(outCtx, finalCanvas.width, finalCanvas.height, textConfig, frameConfig, logoConfig);
-  return finalCanvas;
-}
-
-function loadSavedPresets() {
-  try {
-    const raw = localStorage.getItem(CUSTOM_PRESETS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
+import {
+  canvasToBlob,
+  cloneImageData,
+  createBlankCanvas,
+  imageDataToCanvas,
+  imageSizeOf,
+  rasterize,
+  readImage,
+  transformAlphaMask,
+  workingSizeOf,
+} from './engine/canvasUtils';
+import { renderCompositeCanvas, renderForExport } from './engine/renderComposite';
+import { useEditorHistory } from './hooks/useEditorHistory';
+import { useCustomPresets } from './hooks/useCustomPresets';
+import { useEditorShortcuts } from './hooks/useEditorShortcuts';
+import {
+  DRAFT_MESSAGES,
+  DRAFT_WARNING_STATES,
+  useDraftAutosave,
+  useDraftRestore,
+  useDraftState,
+} from './hooks/useDraftPersistence';
 
 export default function App() {
   const fileInputRef = useRef(null);
@@ -161,13 +76,8 @@ export default function App() {
   const [geometry, setGeometry] = useState([]);
   const [sourceSize, setSourceSize] = useState(null);
   const [imageLoadStatus, setImageLoadStatus] = useState('');
-  const [draftStatus, setDraftStatus] = useState('loading');
-  const draftReadyRef = useRef(false);
-  const draftAvailableRef = useRef(true);
-  const draftDirtyRef = useRef(false);
-  const draftRevisionRef = useRef(null);
-  const draftWritesRef = useRef(Promise.resolve());
-  const draftWriteVersion = useRef(0);
+  const draft = useDraftState();
+  const { readyRef: draftReadyRef, markDirty: markDraftDirty } = draft;
 
   // Editor core buffers
   const origDataRef = useRef(null);
@@ -177,10 +87,8 @@ export default function App() {
   const [originalCanvasState, setOriginalCanvasState] = useState(null);
   const [hasCutoutMask, setHasCutoutMask] = useState(false);
 
-  // Undo / Redo history
-  const historyRef = useRef([]);
-  const historyIdxRef = useRef(-1);
-  const [historyMeta, setHistoryMeta] = useState({ canUndo: false, canRedo: false });
+  // Undo / Redo history (memory-bounded)
+  const history = useEditorHistory();
 
   // Display canvas & histogram passed to CanvasStage / RightPanel
   const [displayCanvas, setDisplayCanvas] = useState(null);
@@ -203,7 +111,7 @@ export default function App() {
   const [activePreset, setActivePreset] = useState('original');
   const [adjustments, setAdjustments] = useState({ ...DEFAULT_ADJUSTMENTS });
   const [beauty, setBeauty] = useState({ ...DEFAULT_BEAUTY });
-  const [customPresets, setCustomPresets] = useState(loadSavedPresets);
+  const { customPresets, addPreset, deletePreset } = useCustomPresets();
   const [copiedStyle, setCopiedStyle] = useState(null);
 
   // Brush & Liquify
@@ -246,11 +154,6 @@ export default function App() {
   const [logoConfig, setLogoConfig] = useState({ ...DEFAULT_LOGO });
   const [editorNotice, setEditorNotice] = useState('');
 
-  const markDraftDirty = useCallback(() => {
-    draftDirtyRef.current = true;
-    draftWriteVersion.current++;
-  }, []);
-
   const cancelEraseJob = useCallback(() => {
     if (!eraseJobRef.current) return;
     const { controller } = eraseJobRef.current;
@@ -264,6 +167,16 @@ export default function App() {
   const updateGeometry = useCallback((operations) => {
     geometryRef.current = operations;
     setGeometry(operations);
+  }, []);
+
+  /** Replaces the magic-eraser mask with an empty one of the given size. */
+  const resetEraseMask = useCallback((width, height) => {
+    const mc = createBlankCanvas(width, height);
+    eraseMaskCanvasRef.current = mc;
+    setEraseMaskCanvasState(mc);
+    eraseMaskRef.current = new Uint8Array(width * height);
+    setHasEraseMask(false);
+    setEraseMaskVersion((v) => v + 1);
   }, []);
 
   // Latest params ref so async/event commits never read stale state
@@ -292,19 +205,12 @@ export default function App() {
     };
   }, [adjustments, activePreset, beauty, bgState, textConfig, frameConfig, logoConfig, imageSize, sourceSize]);
 
-  const updateHistoryMeta = useCallback(() => {
-    setHistoryMeta({
-      canUndo: historyIdxRef.current > 0,
-      canRedo: historyIdxRef.current < historyRef.current.length - 1,
-    });
-  }, []);
-
   const pushSnapshot = useCallback(
     (includePixels = false, paramOverrides = {}) => {
       if (!workDataRef.current) return;
       markDraftDirty();
       const p = latestParamsRef.current;
-      const prevEntry = historyRef.current[historyIdxRef.current];
+      const prevEntry = history.current();
 
       const entry = {
         workData: includePixels || !prevEntry ? cloneImageData(workDataRef.current) : prevEntry.workData,
@@ -326,14 +232,9 @@ export default function App() {
         geometry: geometryRef.current,
       };
 
-      const next = historyRef.current.slice(0, historyIdxRef.current + 1);
-      next.push(entry);
-      if (next.length > 25) next.shift();
-      historyRef.current = next;
-      historyIdxRef.current = next.length - 1;
-      updateHistoryMeta();
+      history.append(entry);
     },
-    [markDraftDirty, updateHistoryMeta]
+    [history, markDraftDirty]
   );
 
   const fitZoomToScreen = useCallback((w, h) => {
@@ -380,11 +281,10 @@ export default function App() {
       textConfig: { ...p.textConfig },
       frameConfig: { ...p.frameConfig },
       logoConfig: { ...p.logoConfig },
-      history: historyRef.current,
-      historyIdx: historyIdxRef.current,
+      ...history.snapshot(),
       geometry: geometryRef.current,
     };
-  }, [hasEraseMask, cloneSource]);
+  }, [hasEraseMask, cloneSource, history]);
 
   const saveCurrentSession = useCallback((imgId) => {
     if (!imgId || loadedImageIdRef.current !== imgId) return;
@@ -406,9 +306,7 @@ export default function App() {
       setHasCutoutMask(s.hasCutoutMask);
 
       eraseMaskRef.current = new Uint8Array(s.eraseMask);
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = s.workData.width;
-      maskCanvas.height = s.workData.height;
+      const maskCanvas = createBlankCanvas(s.workData.width, s.workData.height);
       if (s.eraseMaskCanvas) maskCanvas.getContext('2d').drawImage(s.eraseMaskCanvas, 0, 0);
       eraseMaskCanvasRef.current = maskCanvas;
       setEraseMaskCanvasState(maskCanvas);
@@ -417,9 +315,7 @@ export default function App() {
       setCloneSource(s.cloneSource);
       setPickingCloneSource(false);
 
-      historyRef.current = s.history;
-      historyIdxRef.current = s.historyIdx;
-      updateHistoryMeta();
+      history.reset(s.history, s.historyIdx);
 
       const pending = pendingStyleByIdRef.current[imgId];
       if (pending) {
@@ -448,7 +344,7 @@ export default function App() {
       setRenderTick((t) => t + 1);
       return true;
     },
-    [fitZoomToScreen, updateGeometry, updateHistoryMeta]
+    [fitZoomToScreen, history, updateGeometry]
   );
 
   const loadImageFromUrl = useCallback(
@@ -464,12 +360,7 @@ export default function App() {
         }
         const { width: w, height: h } = workingSizeOf(originalSize, maxDimension);
 
-        const c = document.createElement('canvas');
-        c.width = w;
-        c.height = h;
-        const ctx = c.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0, w, h);
-        const imgData = ctx.getImageData(0, 0, w, h);
+        const { canvas: c, data: imgData } = rasterize(img, w, h);
 
         origDataRef.current = imgData;
         workDataRef.current = cloneImageData(imgData);
@@ -479,14 +370,7 @@ export default function App() {
         cutoutAlphaRef.current = null;
         setHasCutoutMask(false);
 
-        const mc = document.createElement('canvas');
-        mc.width = w;
-        mc.height = h;
-        eraseMaskCanvasRef.current = mc;
-        setEraseMaskCanvasState(mc);
-        eraseMaskRef.current = new Uint8Array(w * h);
-        setHasEraseMask(false);
-        setEraseMaskVersion((v) => v + 1);
+        resetEraseMask(w, h);
         setCloneSource(null);
         setPickingCloneSource(false);
 
@@ -501,7 +385,7 @@ export default function App() {
         const initFrame = { ...DEFAULT_FRAME };
         const initLogo = { ...DEFAULT_LOGO };
 
-        historyRef.current = [
+        history.reset([
           {
             workData: cloneImageData(imgData),
             origData: imgData,
@@ -516,9 +400,7 @@ export default function App() {
             logoConfig: initLogo,
             geometry: [],
           },
-        ];
-        historyIdxRef.current = 0;
-        updateHistoryMeta();
+        ]);
 
         setImageSize({ width: w, height: h });
         setSourceSize(originalSize);
@@ -544,7 +426,7 @@ export default function App() {
         }
       }
     },
-    [fitZoomToScreen, imageJobs, markDraftDirty, updateGeometry, updateHistoryMeta, workMaxDim]
+    [fitZoomToScreen, history, imageJobs, markDraftDirty, resetEraseMask, updateGeometry, workMaxDim]
   );
 
   const showImage = useCallback((item, maxDimension, persistOnLoad) => {
@@ -568,8 +450,7 @@ export default function App() {
     eraseMaskRef.current = null;
     eraseMaskCanvasRef.current = null;
     updateGeometry([]);
-    historyRef.current = [];
-    historyIdxRef.current = -1;
+    history.reset();
     setOriginalCanvasState(null);
     setDisplayCanvas(null);
     setHistogram(null);
@@ -577,9 +458,8 @@ export default function App() {
     setSourceSize(null);
     setHasCutoutMask(false);
     setHasEraseMask(false);
-    updateHistoryMeta();
     if (item) void loadImageFromUrl(item.url, item.id, maxDimension, persistOnLoad);
-  }, [cancelEraseJob, imageJobs, loadImageFromUrl, restoreSession, updateGeometry, updateHistoryMeta]);
+  }, [cancelEraseJob, history, imageJobs, loadImageFromUrl, restoreSession, updateGeometry]);
 
   const handleSelectImage = useCallback(
     (item) => {
@@ -588,7 +468,7 @@ export default function App() {
       saveCurrentSession(imageJobs.activeId);
       showImage(item);
     },
-    [imageJobs, markDraftDirty, saveCurrentSession, showImage]
+    [draftReadyRef, imageJobs, markDraftDirty, saveCurrentSession, showImage]
   );
 
   const handleFilesSelected = useCallback(
@@ -608,7 +488,7 @@ export default function App() {
       setImages((prev) => [...prev, ...newItems]);
       showImage(newItems[0]);
     },
-    [imageJobs, markDraftDirty, saveCurrentSession, showImage]
+    [draftReadyRef, imageJobs, markDraftDirty, saveCurrentSession, showImage]
   );
 
   const handleLoadSample = useCallback(() => {
@@ -623,11 +503,10 @@ export default function App() {
     };
     setImages((prev) => [...prev, item]);
     showImage(item);
-  }, [imageJobs, markDraftDirty, saveCurrentSession, showImage]);
+  }, [draftReadyRef, imageJobs, markDraftDirty, saveCurrentSession, showImage]);
 
   const handleRemoveImage = useCallback(
-    (e, item) => {
-      e.stopPropagation();
+    (item) => {
       markDraftDirty();
       if (item.isObjectUrl) {
         URL.revokeObjectURL(item.url);
@@ -643,119 +522,30 @@ export default function App() {
     [images, imageJobs, markDraftDirty, showImage]
   );
 
-  useEffect(() => {
-    if (draftReadyRef.current) return;
-    let cancelled = false;
+  useDraftRestore({
+    draft,
+    sessionsRef,
+    pendingStyleByIdRef,
+    setImages,
+    setWorkMaxDim,
+    showImage,
+    sampleUrl: samplePortraitUrl,
+  });
 
-    async function restoreDraft() {
-      try {
-        const draft = await loadDraft();
-        if (cancelled) return;
-        draftRevisionRef.current = draft?.revision ?? null;
-        if (!draft) {
-          draftReadyRef.current = true;
-          setDraftStatus('idle');
-          return;
-        }
-
-        const sessions = await Promise.all(Object.entries(draft.sessions).map(async ([id, session]) => {
-          return [id, await hydrateSession(session, readImage)];
-        }));
-        if (cancelled) return;
-        const items = draft.images.map((item) => ({
-          ...item,
-          url: item.blob ? URL.createObjectURL(item.blob) : samplePortraitUrl,
-          isObjectUrl: !!item.blob,
-        }));
-        sessionsRef.current = Object.fromEntries(sessions);
-        pendingStyleByIdRef.current = draft.pendingStyles ?? {};
-        draftReadyRef.current = true;
-        setImages(items);
-        setWorkMaxDim(draft.workMaxDim);
-        showImage(items.find((item) => item.id === draft.activeImageId) ?? items[0], draft.workMaxDim, false);
-        setDraftStatus(items.length ? 'restored' : 'idle');
-      } catch {
-        if (cancelled) return;
-        draftAvailableRef.current = false;
-        draftReadyRef.current = true;
-        setDraftStatus('unavailable');
-      }
-    }
-
-    void restoreDraft();
-    return () => { cancelled = true; };
-  }, [showImage]);
-
-  useEffect(() => {
-    if (!draftReadyRef.current || !draftAvailableRef.current || !draftDirtyRef.current) return;
-    const version = draftWriteVersion.current;
-    let queued = false;
-
-    function persistDraft() {
-      if (queued || draftWriteVersion.current !== version) return;
-      queued = true;
-      const activeSession = loadedImageIdRef.current === activeImageId ? captureCurrentSession() : null;
-      const sessions = {};
-      for (const item of images) {
-        let session = item.id === activeImageId && activeSession ? activeSession : sessionsRef.current[item.id];
-        if (!session) continue;
-        if (session === activeSession) {
-          session = {
-            ...session,
-            workData: cloneImageData(session.workData),
-            eraseMask: new Uint8Array(session.eraseMask),
-            cutoutAlpha: session.cutoutAlpha?.slice() ?? null,
-          };
-        }
-        const start = Math.max(0, session.historyIdx - DRAFT_HISTORY_LIMIT + 2);
-        sessions[item.id] = serializeSession({
-          ...session,
-          history: session.history.slice(start, start + DRAFT_HISTORY_LIMIT),
-          historyIdx: session.historyIdx - start,
-        });
-      }
-
-      const draft = {
-        revision: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-        images: images.map(({ id, name, blob }) => ({ id, name, blob })),
-        activeImageId,
-        workMaxDim,
-        sessions,
-        pendingStyles: { ...pendingStyleByIdRef.current },
-      };
-      draftWritesRef.current = draftWritesRef.current.then(async () => {
-        if (!draftAvailableRef.current) return;
-        await saveDraft(draft, draftRevisionRef.current);
-        draftRevisionRef.current = draft.revision;
-        if (draftWriteVersion.current !== version) return;
-        draftDirtyRef.current = false;
-        setDraftStatus(images.length ? 'saved' : 'idle');
-      }).catch((error) => {
-        if (error.code === 'DRAFT_CONFLICT') {
-          draftAvailableRef.current = false;
-          setDraftStatus('conflict');
-        } else if (draftWriteVersion.current === version) {
-          setDraftStatus('error');
-        }
-      });
-    }
-
-    setDraftStatus('saving');
-    const timer = setTimeout(persistDraft, 350);
-    const flushWhenHidden = () => {
-      if (document.visibilityState === 'hidden') persistDraft();
-    };
-    document.addEventListener('visibilitychange', flushWhenHidden);
-    window.addEventListener('pagehide', persistDraft);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('visibilitychange', flushWhenHidden);
-      window.removeEventListener('pagehide', persistDraft);
-    };
-  }, [
-    activeImageId, activePreset, adjustments, beauty, bgState, captureCurrentSession,
-    copiedStyle, eraseMaskVersion, frameConfig, historyMeta, images, logoConfig, renderTick, textConfig, workMaxDim,
-  ]);
+  useDraftAutosave({
+    draft,
+    images,
+    activeImageId,
+    workMaxDim,
+    loadedImageIdRef,
+    sessionsRef,
+    pendingStyleByIdRef,
+    captureCurrentSession,
+    triggers: [
+      activePreset, adjustments, beauty, bgState, copiedStyle, eraseMaskVersion,
+      frameConfig, history.meta, logoConfig, renderTick, textConfig,
+    ],
+  });
 
   // Re-render pipeline throttled with requestAnimationFrame
   useEffect(() => {
@@ -802,14 +592,7 @@ export default function App() {
       const h = entry.workData.height;
       const prevSize = latestParamsRef.current.imageSize;
       if (!prevSize || prevSize.width !== w || prevSize.height !== h) {
-        const mc = document.createElement('canvas');
-        mc.width = w;
-        mc.height = h;
-        eraseMaskCanvasRef.current = mc;
-        setEraseMaskCanvasState(mc);
-        eraseMaskRef.current = new Uint8Array(w * h);
-        setHasEraseMask(false);
-        setEraseMaskVersion((v) => v + 1);
+        resetEraseMask(w, h);
         setImageSize({ width: w, height: h });
         fitZoomToScreen(w, h);
       }
@@ -823,81 +606,24 @@ export default function App() {
       setLogoConfig(entry.logoConfig ? { ...entry.logoConfig } : { ...DEFAULT_LOGO });
       setRenderTick((t) => t + 1);
     },
-    [cancelEraseJob, fitZoomToScreen, imageJobs, markDraftDirty, updateGeometry]
+    [cancelEraseJob, fitZoomToScreen, imageJobs, markDraftDirty, resetEraseMask, updateGeometry]
   );
 
   // Undo / Redo handlers
-  const handleUndo = useCallback(() => {
-    if (historyIdxRef.current <= 0) return;
-    historyIdxRef.current -= 1;
-    restoreHistoryEntry(historyRef.current[historyIdxRef.current]);
-    updateHistoryMeta();
-  }, [restoreHistoryEntry, updateHistoryMeta]);
+  const handleUndo = useCallback(() => restoreHistoryEntry(history.step(-1)), [history, restoreHistoryEntry]);
+  const handleRedo = useCallback(() => restoreHistoryEntry(history.step(1)), [history, restoreHistoryEntry]);
 
-  const handleRedo = useCallback(() => {
-    if (historyIdxRef.current >= historyRef.current.length - 1) return;
-    historyIdxRef.current += 1;
-    restoreHistoryEntry(historyRef.current[historyIdxRef.current]);
-    updateHistoryMeta();
-  }, [restoreHistoryEntry, updateHistoryMeta]);
-
-  // Global keyboard shortcuts & Clipboard paste (Ctrl+V)
-  useEffect(() => {
-    const onKeyDown = (e) => {
-      if (e.target instanceof Element && e.target.closest('dialog[open]')) return;
-      const inInput = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT';
-
-      if (!inInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) handleRedo();
-        else handleUndo();
-      } else if (!inInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        if (workDataRef.current) setExportOpen(true);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
-        e.preventDefault();
-        fileInputRef.current?.click();
-      } else if (!inInput && e.key === '[') {
-        setBrushSize((s) => Math.max(8, s - 6));
-      } else if (!inInput && e.key === ']') {
-        setBrushSize((s) => Math.min(180, s + 6));
-      } else if (!inInput && e.key === '\\') {
-        setIsComparingOriginal(true);
-      }
-    };
-    const onKeyUp = (e) => {
-      if (e.key === '\\') {
-        setIsComparingOriginal(false);
-      }
-    };
-    const onPaste = (e) => {
-      if (e.target instanceof Element && e.target.closest('dialog[open]')) return;
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      const pastedFiles = [];
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].type.startsWith('image/')) {
-          const f = items[i].getAsFile();
-          if (f) pastedFiles.push(f);
-        }
-      }
-      if (pastedFiles.length > 0) {
-        e.preventDefault();
-        handleFilesSelected(pastedFiles);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('paste', onPaste);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('paste', onPaste);
-    };
-  }, [handleUndo, handleRedo, handleFilesSelected]);
+  useEditorShortcuts({
+    onUndo: handleUndo,
+    onRedo: handleRedo,
+    onExport: () => {
+      if (workDataRef.current) setExportOpen(true);
+    },
+    onOpenFile: () => fileInputRef.current?.click(),
+    onBrushSize: (delta) => setBrushSize((s) => Math.min(180, Math.max(8, s + delta))),
+    onCompare: setIsComparingOriginal,
+    onPasteFiles: handleFilesSelected,
+  });
 
   // Brush / Liquify / Erase / Background Mask strokes
   const isBrushActive =
@@ -1090,12 +816,7 @@ export default function App() {
       const img = await readImage(resultUrl);
       if (!imageJobs.isCurrent(job)) return;
       const { width, height } = source;
-      const c = document.createElement('canvas');
-      c.width = width;
-      c.height = height;
-      const ctx = c.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0, width, height);
-      const maskData = ctx.getImageData(0, 0, width, height).data;
+      const maskData = rasterize(img, width, height).data.data;
       const alpha = new Uint8ClampedArray(width * height);
       for (let i = 0, p = 0; i < maskData.length; i += 4, p++) {
         alpha[p] = maskData[i + 3];
@@ -1148,37 +869,10 @@ export default function App() {
 
     // Transform cutoutAlpha mask alongside image if present
     if (cutoutAlphaRef.current && cutoutAlphaRef.current.length === oldW * oldH) {
-      const mSrc = document.createElement('canvas');
-      mSrc.width = oldW;
-      mSrc.height = oldH;
-      const mCtx = mSrc.getContext('2d');
-      const mImg = mCtx.createImageData(oldW, oldH);
-      const md = mImg.data;
-      const alpha = cutoutAlphaRef.current;
-      for (let p = 0, i = 0; p < alpha.length; p++, i += 4) {
-        md[i] = 255;
-        md[i + 1] = 255;
-        md[i + 2] = 255;
-        md[i + 3] = alpha[p];
-      }
-      mCtx.putImageData(mImg, 0, 0);
-      const mDst = transformImageCanvas(mSrc, operation);
-      const mOut = mDst.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, mDst.width, mDst.height).data;
-      const nextAlpha = new Uint8ClampedArray(mDst.width * mDst.height);
-      for (let p = 0, i = 0; p < nextAlpha.length; p++, i += 4) {
-        nextAlpha[p] = mOut[i + 3];
-      }
-      cutoutAlphaRef.current = nextAlpha;
+      cutoutAlphaRef.current = transformAlphaMask(cutoutAlphaRef.current, oldW, oldH, operation);
     }
 
-    const mc = document.createElement('canvas');
-    mc.width = nextWork.data.width;
-    mc.height = nextWork.data.height;
-    eraseMaskCanvasRef.current = mc;
-    setEraseMaskCanvasState(mc);
-    eraseMaskRef.current = new Uint8Array(nextWork.data.width * nextWork.data.height);
-    setHasEraseMask(false);
-    setEraseMaskVersion((v) => v + 1);
+    resetEraseMask(nextWork.data.width, nextWork.data.height);
     setCloneSource(null);
     setPickingCloneSource(false);
 
@@ -1276,30 +970,12 @@ export default function App() {
   };
 
   const handleSaveCustomPreset = (name) => {
-    const newPreset = {
-      id: `custom-${Date.now()}`,
-      name,
-      values: { ...adjustments },
-    };
-    const next = [...customPresets, newPreset];
-    setCustomPresets(next);
-    setActivePreset(newPreset.id);
-    try {
-      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore storage quota errors
-    }
+    setActivePreset(addPreset(name, adjustments).id);
   };
 
   const handleDeleteCustomPreset = (id) => {
-    const next = customPresets.filter((p) => p.id !== id);
-    setCustomPresets(next);
+    deletePreset(id);
     if (activePreset === id) setActivePreset('custom');
-    try {
-      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore storage errors
-    }
   };
 
   const handleCopyStyle = () => {
@@ -1351,46 +1027,12 @@ export default function App() {
   const defaultFileName = activeItem ? activeItem.name.replace(/\.[^/.]+$/, '') + '-edited' : 'LKMagic-Export';
   const fullResolutionSize = getTransformedSize(sourceSize, geometry);
 
-  async function renderForExport(item, session, resolution, style) {
-    if (session && resolution === 'working') return renderCompositeCanvas(session);
-
-    const image = await readImage(item.url);
-    const settings = session ?? {
-      adjustments: style?.adjustments ?? DEFAULT_ADJUSTMENTS,
-      beauty: style?.beauty ?? DEFAULT_BEAUTY,
-      bgState: DEFAULT_BG_STATE,
-      textConfig: DEFAULT_TEXT,
-      frameConfig: DEFAULT_FRAME,
-      logoConfig: DEFAULT_LOGO,
-    };
-    if (resolution === 'original') {
-      const fullSize = getTransformedSize(imageSizeOf(image), session?.geometry);
-      if (session && fullSize.width === session.workData.width && fullSize.height === session.workData.height) {
-        return renderCompositeCanvas(session);
-      }
-      return renderCompositeCanvas({ ...settings, ...buildOriginalSource(image, session ?? {}) });
-    }
-
-    const { width, height } = workingSizeOf(imageSizeOf(image), workMaxDim);
-    const originalCanvas = document.createElement('canvas');
-    originalCanvas.width = width;
-    originalCanvas.height = height;
-    const context = originalCanvas.getContext('2d', { willReadFrequently: true });
-    if (!context) throw new Error('Trình duyệt không đủ bộ nhớ để mở ảnh.');
-    context.drawImage(image, 0, 0, width, height);
-    return renderCompositeCanvas({
-      ...settings,
-      workData: context.getImageData(0, 0, width, height),
-      origCanvas: originalCanvas,
-    });
-  }
-
   async function activeExportCanvas(resolution, idSheetGrid) {
     if (!activeItem || loadedImageIdRef.current !== activeItem.id || !displayCanvas) {
       throw new Error('Hãy mở ảnh cần xuất trước.');
     }
     const source = resolution === 'original'
-      ? await renderForExport(activeItem, captureCurrentSession(), resolution)
+      ? await renderForExport(activeItem, captureCurrentSession(), resolution, null, workMaxDim)
       : displayCanvas;
     if (!idSheetGrid) return source;
     const [cols, rows] = idSheetGrid.split('x').map(Number);
@@ -1418,7 +1060,7 @@ export default function App() {
     let firstError;
     for (const [index, { item, session, style }] of selected.entries()) {
       try {
-        const canvas = await renderForExport(item, session, resolution, style);
+        const canvas = await renderForExport(item, session, resolution, style, workMaxDim);
         const blob = await encodeCanvas(canvas, format, quality, scale);
         const name = uniqueExportName(item.name.replace(/\.[^/.]+$/, '') + '-edited', format, usedNames);
         entries.push({ name, blob });
@@ -1487,14 +1129,7 @@ export default function App() {
     }
   };
 
-  const draftMessage = {
-    saving: 'Đang lưu bản nháp…',
-    saved: 'Đã lưu bản nháp trên thiết bị',
-    restored: 'Đã khôi phục bản nháp',
-    unavailable: 'Trình duyệt này hiện không thể lưu bản nháp',
-    error: 'Chưa lưu được bản nháp. Bạn vẫn có thể xuất ảnh.',
-    conflict: 'Bản nháp đã thay đổi ở tab khác. Hãy xuất ảnh trước khi tải lại trang.',
-  }[draftStatus];
+  const draftMessage = DRAFT_MESSAGES[draft.status];
 
   return (
     <div className="relative h-dvh w-full flex flex-col bg-[#0f1116] text-slate-100 overflow-hidden">
@@ -1535,8 +1170,8 @@ export default function App() {
         onOpenFile={() => fileInputRef.current?.click()}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        canUndo={historyMeta.canUndo}
-        canRedo={historyMeta.canRedo}
+        canUndo={history.meta.canUndo}
+        canRedo={history.meta.canRedo}
         splitView={splitView}
         onToggleSplit={() => setSplitView((v) => !v)}
         onCompareStart={() => setIsComparingOriginal(true)}
@@ -1633,49 +1268,19 @@ export default function App() {
             </div>
           )}
 
-          {/* Bottom Filmstrip */}
           {showFilmstrip && images.length > 0 && (
-            <div className="h-16 md:h-20 shrink-0 bg-[#13161e] border-t border-[#252a37] px-3 flex items-center gap-2 overflow-x-auto">
-              {images.map((item) => {
-                const active = item.id === activeImageId;
-                return (
-                  <div
-                    key={item.id}
-                    onClick={() => handleSelectImage(item)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') handleSelectImage(item);
-                    }}
-                    className={`group relative h-14 w-14 shrink-0 rounded-lg overflow-hidden border-2 transition cursor-pointer ${
-                      active ? 'border-amber-400 shadow-md shadow-amber-500/20' : 'border-[#2a303e] opacity-75 hover:opacity-100'
-                    }`}
-                    title={item.name}
-                  >
-                    <img src={item.url} alt={item.name} className="w-full h-full object-cover" />
-                    <button
-                      onClick={(e) => handleRemoveImage(e, item)}
-                      title="Xóa ảnh khỏi danh sách"
-                      className="opacity-100 md:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/75 text-slate-200 hover:text-rose-400 flex items-center justify-center transition cursor-pointer"
-                    >
-                      <X className="w-2.5 h-2.5" />
-                    </button>
-                  </div>
-                );
-              })}
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="h-14 w-14 shrink-0 rounded-lg border border-dashed border-[#343b4e] hover:border-amber-400 text-slate-400 hover:text-amber-400 flex items-center justify-center text-xl cursor-pointer transition"
-                title="Thêm ảnh"
-              >
-                +
-              </button>
-            </div>
+            <Filmstrip
+              images={images}
+              activeImageId={activeImageId}
+              onSelect={handleSelectImage}
+              onRemove={handleRemoveImage}
+              onAdd={() => fileInputRef.current?.click()}
+            />
           )}
           {draftMessage && (
             <p
               role="status"
-              className={`shrink-0 border-t border-[#252a37] bg-[#13161e] px-3 py-1 text-[11px] ${['unavailable', 'error', 'conflict'].includes(draftStatus) ? 'text-amber-200' : 'text-slate-400'}`}
+              className={`shrink-0 border-t border-[#252a37] bg-[#13161e] px-3 py-1 text-[11px] ${DRAFT_WARNING_STATES.includes(draft.status) ? 'text-amber-200' : 'text-slate-400'}`}
             >
               {draftMessage}
             </p>
@@ -1799,7 +1404,7 @@ export default function App() {
         onExportBatch={handleExportBatch}
         onCopyToClipboard={handleCopyToClipboard}
       />
-      {draftStatus === 'loading' && (
+      {draft.status === 'loading' && (
         <div role="status" className="absolute inset-0 z-50 grid place-items-center bg-[#0f1116] text-sm text-slate-200">
           Đang mở bản nháp…
         </div>
