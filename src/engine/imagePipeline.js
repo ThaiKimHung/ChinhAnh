@@ -1,3 +1,6 @@
+import { createLiquifySession, liquifyDab } from './liquify.js';
+import { getSkinMask, sampleSkinMask } from './skinMask.js';
+
 export const DEFAULT_HSL = {
   red: [0, 0, 0],
   orange: [0, 0, 0],
@@ -68,8 +71,8 @@ export const DEFAULT_LOGO = {
   img: null,
   scale: 18, // % of shorter image dimension
   opacity: 90,
-  x: 84,
-  y: 84,
+  x: 86,
+  y: 12, // top-right, clear of the default caption at the bottom
 };
 
 export const DEFAULT_FRAME = {
@@ -127,9 +130,9 @@ export const PRESETS = [
       contrast: 10,
       highlights: -10,
       shadows: 12,
-      temperature: 28,
+      temperature: 16,
       tint: 4,
-      vibrance: 20,
+      vibrance: 8,
       vignette: 18,
     },
   },
@@ -177,10 +180,12 @@ export const PRESETS = [
       contrast: 18,
       highlights: -10,
       shadows: 10,
-      temperature: -24,
-      tint: 10,
+      temperature: -18,
+      tint: -8,
       vibrance: 15,
       vignette: 22,
+      // Pull skin back from magenta under the cool cast.
+      hsl: { ...DEFAULT_HSL, red: [8, 0, 0], orange: [8, 0, 0] },
     },
   },
   {
@@ -202,19 +207,6 @@ export const PRESETS = [
 
 function clamp(v, min = 0, max = 255) {
   return v < min ? min : v > max ? max : v;
-}
-
-/**
- * Fast skin-tone probability (0..1) in RGB using YCbCr bounds.
- */
-function getSkinWeight(r, g, b) {
-  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
-  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
-  if (cb < 72 || cb > 132 || cr < 130 || cr > 178) return 0;
-  const cbDist = Math.abs(cb - 102) / 30;
-  const crDist = Math.abs(cr - 152) / 26;
-  const w = 1 - Math.max(cbDist, crDist);
-  return w > 0 ? Math.min(1, w * 1.35) : 0;
 }
 
 /**
@@ -342,6 +334,37 @@ function hslToRgb(hDeg, s, l) {
 /**
  * Full pixel pipeline: Beauty + Color Adjustments + HSL Mixer + Clarity + Fade + Grain + Sharpen + Vignette.
  */
+/**
+ * Per-pixel grain value 0..255 from a 32-bit integer hash (murmur3 finaliser),
+ * so the grain has no visible pattern. Mirrored exactly in the WebGL shader.
+ */
+export function grainHash(x, y) {
+  let h = Math.imul(x, 0x27d4eb2d) ^ Math.imul(y, 0x165667b1);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h & 255;
+}
+
+/** Highlight shoulder: values above KNEE approach 255 smoothly instead of clipping. */
+export const HIGHLIGHT_KNEE = 200;
+export const HIGHLIGHT_SOFTNESS = 55;
+
+function shoulder(v) {
+  return v <= HIGHLIGHT_KNEE ? v : HIGHLIGHT_KNEE + HIGHLIGHT_SOFTNESS * (1 - Math.exp(-(v - HIGHLIGHT_KNEE) / HIGHLIGHT_SOFTNESS));
+}
+
+/**
+ * Compresses only the part of a channel that the edit pushed up (`v` above the
+ * source value `base`), so untouched pixels stay exact and brightened
+ * highlights keep their gradation instead of flattening at 255.
+ */
+function rollOff(v, base) {
+  return v <= base ? v : base + shoulder(v) - shoulder(base);
+}
+
 /** Share of fine pore texture put back after skin smoothing (avoids a waxy look). */
 export const SKIN_TEXTURE_KEEP = 0.6;
 
@@ -350,6 +373,7 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
   const out = new Uint8ClampedArray(src.length);
 
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
+  const skin = hasBeauty ? getSkinMask(srcImageData) : null;
   let blurred = null;
   let fineBlur = null;
   if (beauty.skinSmooth > 0) {
@@ -414,7 +438,7 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
 
       // 1. Portrait Beauty (skin-masked + edge-preserving)
       if (hasBeauty) {
-        const skinW = getSkinWeight(r, g, b);
+        const skinW = sampleSkinMask(skin, x, y);
         if (skinW > 0.02) {
           if (blurred) {
             const br = blurred[i];
@@ -560,16 +584,16 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
 
       // 11. Film Grain (deterministic pixel hash)
       if (grainAmount > 0) {
-        const hash = (((x * 374761393 + y * 668265263) ^ 0x5bf03635) >>> 0) % 256;
+        const hash = grainHash(x, y);
         const noise = (hash / 255 - 0.5) * grainAmount;
         r += noise;
         g += noise;
         b += noise;
       }
 
-      out[i] = clamp(r);
-      out[i + 1] = clamp(g);
-      out[i + 2] = clamp(b);
+      out[i] = clamp(rollOff(r, src[i]));
+      out[i + 1] = clamp(rollOff(g, src[i + 1]));
+      out[i + 2] = clamp(rollOff(b, src[i + 2]));
       out[i + 3] = a;
     }
   }
@@ -604,35 +628,6 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
   }
 
   return new ImageData(out, width, height);
-}
-
-function sampleBilinear(data, width, height, x, y, outArr, outIdx) {
-  const boundedX = clamp(x, 0, width - 1);
-  const boundedY = clamp(y, 0, height - 1);
-  const x0 = Math.floor(boundedX);
-  const y0 = Math.floor(boundedY);
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const fx = boundedX - x0;
-  const fy = boundedY - y0;
-
-  const i00 = (y0 * width + x0) * 4;
-  const i10 = (y0 * width + x1) * 4;
-  const i01 = (y1 * width + x0) * 4;
-  const i11 = (y1 * width + x1) * 4;
-
-  // Interpolate premultiplied color so invisible pixels cannot tint a warped edge.
-  const w00 = (1 - fx) * (1 - fy) * data[i00 + 3];
-  const w10 = fx * (1 - fy) * data[i10 + 3];
-  const w01 = (1 - fx) * fy * data[i01 + 3];
-  const w11 = fx * fy * data[i11 + 3];
-  const alpha = w00 + w10 + w01 + w11;
-  outArr[outIdx + 3] = alpha;
-  for (let c = 0; c < 3; c++) {
-    outArr[outIdx + c] = alpha > 0
-      ? (data[i00 + c] * w00 + data[i10 + c] * w10 + data[i01 + c] * w01 + data[i11 + c] * w11) / alpha
-      : 0;
-  }
 }
 
 /**
@@ -680,46 +675,8 @@ export function applyLiquifyStroke(imageData, origImageData, x0, y0, x1, y1, rad
     return;
   }
 
-  const str = strength * 0.55;
-  const mvx = x1 - x0;
-  const mvy = y1 - y0;
-  const padX = mode === 'push' ? Math.ceil(Math.abs(mvx) * str) + 3 : 3;
-  const padY = mode === 'push' ? Math.ceil(Math.abs(mvy) * str) + 3 : 3;
-  const snapMinX = Math.max(0, minX - padX);
-  const snapMaxX = Math.min(width - 1, maxX + padX);
-  const snapMinY = Math.max(0, minY - padY);
-  const snapMaxY = Math.min(height - 1, maxY + padY);
-  const { roi, rw, rh, ox, oy } = copyROI(data, width, height, snapMinX, snapMinY, snapMaxX, snapMaxY);
-
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      const dx = x - x1;
-      const dy = y - y1;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= r2) continue;
-
-      const t = 1 - d2 / r2;
-      const falloff = t * t;
-      let sx = x;
-      let sy = y;
-
-      if (mode === 'push') {
-        sx = x - mvx * falloff * str;
-        sy = y - mvy * falloff * str;
-      } else if (mode === 'bloat') {
-        const scale = 1 - falloff * str * 0.35;
-        sx = x1 + dx * scale;
-        sy = y1 + dy * scale;
-      } else if (mode === 'pinch') {
-        const scale = 1 + falloff * str * 0.38;
-        sx = x1 + dx * scale;
-        sy = y1 + dy * scale;
-      }
-
-      const outIdx = (y * width + x) * 4;
-      sampleBilinear(roi, rw, rh, sx - ox, sy - oy, data, outIdx);
-    }
-  }
+  // One-off dab (no session): warp from the current pixels once.
+  liquifyDab(createLiquifySession(imageData), imageData, x0, y0, x1, y1, radius, strength, mode);
 }
 
 /**
@@ -1074,6 +1031,8 @@ export function compositeWithBackground(fgCanvas, backdropCanvas, bgState, resol
   if (bgState.mode === 'color') {
     ctx.fillStyle = bgState.color || '#ffffff';
     ctx.fillRect(0, 0, w, h);
+  } else if (bgState.mode === 'bokeh' && backdropCanvas?.preBlurred) {
+    ctx.drawImage(backdropCanvas, 0, 0, w, h);
   } else if (bgState.mode === 'bokeh' && backdropCanvas) {
     ctx.save();
     const bleed = 16 * resolutionScale;
@@ -1090,6 +1049,55 @@ export function compositeWithBackground(fgCanvas, backdropCanvas, bgState, resol
 
   ctx.drawImage(fgCanvas, 0, 0);
   return out;
+}
+
+/**
+ * Blurred background for the 'bokeh' mode with the subject taken out first, so
+ * the subject's hair and clothes do not bleed into the blur as a dark halo.
+ * The subject becomes transparent and the canvas blur (premultiplied) then
+ * averages only background pixels; areas deep inside the subject are filled
+ * from a wider blur.
+ */
+export function bokehBackdrop(workData, cutoutAlpha, blurPx) {
+  const { width, height, data } = workData;
+  const holes = new ImageData(width, height);
+  const hd = holes.data;
+  for (let p = 0, i = 0; p < cutoutAlpha.length; p++, i += 4) {
+    const keep = 1 - cutoutAlpha[p] / 255;
+    hd[i] = data[i];
+    hd[i + 1] = data[i + 1];
+    hd[i + 2] = data[i + 2];
+    hd[i + 3] = Math.round(data[i + 3] * keep * keep * keep);
+  }
+  const src = document.createElement('canvas');
+  src.width = width;
+  src.height = height;
+  src.getContext('2d').putImageData(holes, 0, 0);
+  const blurred = (radius) => {
+    const c = document.createElement('canvas');
+    c.width = width;
+    c.height = height;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.filter = `blur(${radius}px)`;
+    cx.drawImage(src, 0, 0);
+    return cx.getImageData(0, 0, width, height).data;
+  };
+  const near = blurred(blurPx);
+  const far = blurred(Math.max(blurPx * 4, Math.min(width, height) / 6));
+  const out = new ImageData(width, height);
+  const od = out.data;
+  for (let i = 0; i < od.length; i += 4) {
+    // Readback is un-premultiplied: colour = average of background pixels only.
+    const t = Math.min(1, near[i + 3] / 40);
+    for (let c = 0; c < 3; c++) od[i + c] = near[i + c] * t + far[i + c] * (1 - t);
+    od[i + 3] = 255;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').putImageData(out, 0, 0);
+  canvas.preBlurred = true;
+  return canvas;
 }
 
 /**

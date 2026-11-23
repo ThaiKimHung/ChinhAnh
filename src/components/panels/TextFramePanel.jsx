@@ -1,5 +1,6 @@
 import React from 'react';
 import { ImagePlus, Trash2 } from 'lucide-react';
+import { DEFAULT_LOGO } from '../../engine/imagePipeline';
 import { SliderRow } from './controls';
 
 export default function TextFramePanel({
@@ -253,7 +254,7 @@ export default function TextFramePanel({
               max={95}
               value={logoConfig.x}
               onChange={(v) => setLogoConfig((l) => ({ ...l, x: v }))}
-              onReset={() => setLogoConfig((l) => ({ ...l, x: 84 }))}
+              onReset={() => setLogoConfig((l) => ({ ...l, x: DEFAULT_LOGO.x }))}
               onCommit={onCommitHistory}
             />
             <SliderRow
@@ -262,7 +263,7 @@ export default function TextFramePanel({
               max={95}
               value={logoConfig.y}
               onChange={(v) => setLogoConfig((l) => ({ ...l, y: v }))}
-              onReset={() => setLogoConfig((l) => ({ ...l, y: 84 }))}
+              onReset={() => setLogoConfig((l) => ({ ...l, y: DEFAULT_LOGO.y }))}
               onCommit={onCommitHistory}
             />
           </div>

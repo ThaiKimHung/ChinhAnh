@@ -92,3 +92,58 @@ test('flyaway strands get their own colour and the background haze around them d
   const haze = (10 * W + 22) * 4;
   assert.ok(data[haze + 3] <= 8, `haze alpha ${data[haze + 3]}`);
 });
+
+test('matte pixels that are really old background fade out even at fairly high alpha', () => {
+  const W = 41, H = 21;
+  const bg = [120, 135, 150];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const matte = new Uint8ClampedArray(W * H);
+  for (let p = 0; p < W * H; p++) {
+    const x = p % W;
+    data.set([...bg, 255], p * 4);
+    matte[p] = x === 20 ? 180 : 0; // AI marked a line of plain background as subject
+  }
+  applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 0 });
+  const i = (10 * W + 20) * 4;
+  assert.ok(data[i + 3] <= 40, `alpha ${data[i + 3]}`);
+});
+
+test('a strand the matte made too opaque is thinned to what its colour shows', () => {
+  const W = 61, H = 21;
+  const bg = [120, 135, 150];
+  const hair = [30, 25, 20];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const matte = new Uint8ClampedArray(W * H);
+  for (let p = 0; p < W * H; p++) {
+    const x = p % W;
+    let colour = bg, a = 0;
+    if (x < 20) { colour = hair; a = 255; } // solid hair nearby
+    else if (x === 30) { colour = [0, 1, 2].map((c) => hair[c] * 0.1 + bg[c] * 0.9); a = 160; } // faint strand, over-estimated
+    else if (x === 36) { colour = [0, 1, 2].map((c) => hair[c] * 0.6 + bg[c] * 0.4); a = 160; } // real strand
+    data.set([...colour, 255], p * 4);
+    matte[p] = a;
+  }
+  applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 0 });
+  const faint = (10 * W + 30) * 4;
+  const real = (10 * W + 36) * 4;
+  assert.ok(data[faint + 3] <= 45, `faint strand alpha ${data[faint + 3]}`);
+  assert.ok(data[real + 3] >= 130, `real strand alpha ${data[real + 3]}`);
+  assert.ok(data[real] < 60, `real strand colour ${data[real]}`);
+});
+
+test('a light subject edge next to dark hair is not thinned by colour evidence', () => {
+  const W = 61, H = 21;
+  const bg = [120, 135, 150];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const matte = new Uint8ClampedArray(W * H);
+  for (let p = 0; p < W * H; p++) {
+    const x = p % W;
+    let colour = bg, a = 0;
+    if (x < 20) { colour = [30, 25, 20]; a = 255; }
+    else if (x === 24) { colour = [214, 170, 150]; a = 200; } // soft skin edge
+    data.set([...colour, 255], p * 4);
+    matte[p] = a;
+  }
+  applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 0 });
+  assert.ok(data[(10 * W + 24) * 4 + 3] >= 190, `skin edge alpha ${data[(10 * W + 24) * 4 + 3]}`);
+});

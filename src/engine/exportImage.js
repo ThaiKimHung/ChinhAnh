@@ -138,6 +138,56 @@ function buildCorrection(original, edited) {
   return correction;
 }
 
+/**
+ * How strongly each working pixel should be *replaced* by the edit instead of
+ * having the change added to the full-resolution pixels. Adding works for
+ * gentle retouching (fine detail survives), but after object removal, liquify,
+ * cut & paste or cloning, the full-resolution original still holds the sharp
+ * detail of what was removed or moved, which would come back as a ghost.
+ * Large colour changes (dilated a little so the full-resolution footprint of a
+ * thin object is covered) switch smoothly to the upscaled edit.
+ */
+function buildReplaceWeights(original, edited, width, height) {
+  const n = width * height;
+  const magnitude = new Float32Array(n);
+  let any = false;
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    const visible = Math.min(original[i + 3], edited[i + 3]) / 255;
+    if (!visible) continue;
+    const m = Math.max(
+      Math.abs(edited[i] - original[i]),
+      Math.abs(edited[i + 1] - original[i + 1]),
+      Math.abs(edited[i + 2] - original[i + 2]),
+    ) * visible;
+    magnitude[p] = m;
+    if (m > REPLACE_FROM) any = true;
+  }
+  if (!any) return null;
+  // Max filter (radius 2) in both directions, then a smooth ramp.
+  const R = 2;
+  const tmp = new Float32Array(n);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let m = 0;
+      for (let k = Math.max(0, x - R); k <= Math.min(width - 1, x + R); k++) m = Math.max(m, magnitude[y * width + k]);
+      tmp[y * width + x] = m;
+    }
+  }
+  const weights = new Float32Array(n);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let m = 0;
+      for (let k = Math.max(0, y - R); k <= Math.min(height - 1, y + R); k++) m = Math.max(m, tmp[k * width + x]);
+      const t = Math.min(1, Math.max(0, (m - REPLACE_FROM) / (REPLACE_FULL - REPLACE_FROM)));
+      weights[y * width + x] = t * t * (3 - 2 * t);
+    }
+  }
+  return weights;
+}
+
+const REPLACE_FROM = 6;
+const REPLACE_FULL = 18;
+
 function resampleEdits(output, original, edited, alphaMask) {
   const sameSize = output.width === edited.width && output.height === edited.height;
   const difference = buildCorrection(original.data, edited.data);
@@ -148,6 +198,9 @@ function resampleEdits(output, original, edited, alphaMask) {
   const yAxis = getSamplingAxis(edited.height, output.height);
   const resizedMask = mask && !sameSize ? new Uint8ClampedArray(output.width * output.height) : null;
   const pixels = output.data;
+  const replace = difference && !sameSize ? buildReplaceWeights(original.data, edited.data, edited.width, edited.height) : null;
+  const ed = edited.data;
+  const premultiplied = (index, channel) => (ed[index + channel] * ed[index + 3]) / 255;
 
   // Premultiplied channel deltas preserve alpha transitions without pulling in hidden RGB.
   for (let y = 0, pixel = 0; y < output.height; y++) {
@@ -175,11 +228,21 @@ function resampleEdits(output, original, edited, alphaMask) {
       const bl = bottomLeft * 4;
       const br = bottomRight * 4;
       const sourceAlpha = pixels[i + 3];
-      pixels[i + 3] = sourceAlpha + interpolate(difference, tl + 3, tr + 3, bl + 3, br + 3, tx, ty);
-      const targetAlpha = pixels[i + 3];
+      const r = replace ? interpolate(replace, topLeft, topRight, bottomLeft, bottomRight, tx, ty) : 0;
+      const addedAlpha = sourceAlpha + interpolate(difference, tl + 3, tr + 3, bl + 3, br + 3, tx, ty);
+      const editAlpha = r > 0 ? interpolate(ed, tl + 3, tr + 3, bl + 3, br + 3, tx, ty) : 0;
+      const targetAlpha = Math.min(255, Math.max(0, addedAlpha + (editAlpha - addedAlpha) * r));
+      const sourceColors = [pixels[i], pixels[i + 1], pixels[i + 2]];
+      pixels[i + 3] = targetAlpha;
       for (let channel = 0; channel < 3; channel++) {
         const delta = interpolate(difference, tl + channel, tr + channel, bl + channel, br + channel, tx, ty);
-        pixels[i + channel] = targetAlpha > 0 ? (pixels[i + channel] * sourceAlpha + delta * 255) / targetAlpha : 0;
+        let premult = (sourceColors[channel] * sourceAlpha) / 255 + delta;
+        if (r > 0) {
+          const editPremult = premultiplied(tl, channel) * (1 - tx) * (1 - ty) + premultiplied(tr, channel) * tx * (1 - ty)
+            + premultiplied(bl, channel) * (1 - tx) * ty + premultiplied(br, channel) * tx * ty;
+          premult += (editPremult - premult) * r;
+        }
+        pixels[i + channel] = targetAlpha > 0 ? (premult * 255) / targetAlpha : 0;
       }
     }
   }

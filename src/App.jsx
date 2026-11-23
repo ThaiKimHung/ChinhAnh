@@ -27,7 +27,6 @@ import {
   DEFAULT_TEXT,
   DEFAULT_LOGO,
   DEFAULT_FRAME,
-  applyLiquifyStroke,
   applySkinBrushStroke,
   applyAlphaMaskBrushStroke,
   computeAutoEnhance,
@@ -36,6 +35,7 @@ import {
 } from './engine/imagePipeline';
 import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
 import { pastePatch } from './engine/patch';
+import { createLiquifySession, liquifyDab } from './engine/liquify';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   canvasToBlob,
@@ -124,6 +124,10 @@ export default function App() {
   const [brushSize, setBrushSize] = useState(44);
   const [brushStrength, setBrushStrength] = useState(60);
   const brushStrokeRef = useRef(null);
+  // Liquify keeps a displacement field over the pixels as they were when the
+  // session began; any other pixel edit (or undo) starts a new session.
+  const liquifySessionRef = useRef(null);
+  const pixelEditVersionRef = useRef(0);
   const brushEditedRef = useRef(false);
 
   // Object Removal (Magic Eraser + Clone Stamp)
@@ -219,6 +223,7 @@ export default function App() {
     (includePixels = false, paramOverrides = {}) => {
       if (!workDataRef.current) return;
       markDraftDirty();
+      pixelEditVersionRef.current++;
       const p = latestParamsRef.current;
       const prevEntry = history.current();
 
@@ -810,7 +815,12 @@ export default function App() {
       applySkinBrushStroke(workData, origDataRef.current, x, y, brushSize, strength, brushTool);
     } else if (activeTab === 'liquify') {
       if (liquifyMode === 'push' && fromX === x && fromY === y) return false;
-      applyLiquifyStroke(workData, origDataRef.current, fromX, fromY, x, y, brushSize, strength, liquifyMode);
+      let session = liquifySessionRef.current;
+      if (!session || session.work !== workData || session.version !== pixelEditVersionRef.current) {
+        session = { work: workData, version: pixelEditVersionRef.current, field: createLiquifySession(workData) };
+        liquifySessionRef.current = session;
+      }
+      liquifyDab(session.field, workData, fromX, fromY, x, y, brushSize, strength, liquifyMode);
     } else if (activeTab === 'erase' && eraseMode === 'clone' && cloneOffsetRef.current) {
       const { dx, dy } = cloneOffsetRef.current;
       applyCloneStampStroke(workData, x, y, dx, dy, brushSize, strength, cloneToneMatch);
@@ -865,7 +875,11 @@ export default function App() {
     }
     brushStrokeRef.current = null;
     cloneOffsetRef.current = null;
-    if (brushEditedRef.current && workDataRef.current) pushSnapshot(true);
+    if (brushEditedRef.current && workDataRef.current) {
+      pushSnapshot(true);
+      // The liquify session stays valid across its own strokes.
+      if (liquifySessionRef.current && activeTab === 'liquify') liquifySessionRef.current.version = pixelEditVersionRef.current;
+    }
     brushEditedRef.current = false;
   }, [activeTab, applyBrushDab, liquifyMode, pushSnapshot, updateBrushPreview]);
 

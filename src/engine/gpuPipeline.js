@@ -13,7 +13,8 @@
 // the GPU's texture limits, or anything fails (the GPU path is then disabled
 // for the session).
 
-import { SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline';
+import { HIGHLIGHT_KNEE, HIGHLIGHT_SOFTNESS, SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline';
+import { SKIN_MASK_SCALE, getSkinMask } from './skinMask';
 
 const VERTEX = `#version 300 es
 void main() {
@@ -45,6 +46,8 @@ uniform sampler2D u_src;
 uniform sampler2D u_skinBlur;
 uniform sampler2D u_clarityBlur;
 uniform sampler2D u_fineBlur;
+uniform sampler2D u_skinMask;
+uniform vec2 u_skinMaskSize;
 uniform float u_textureKeep;
 uniform ivec2 u_size;
 uniform bool u_hasBeauty;
@@ -72,12 +75,9 @@ out vec4 o;
 const float BAND_CENTER[6] = float[6](0.0, 30.0, 60.0, 125.0, 215.0, 290.0);
 const float BAND_SPAN[6] = float[6](35.0, 30.0, 35.0, 55.0, 55.0, 50.0);
 
-float skinWeight(vec3 c) {
-  float cb = 128.0 - 0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
-  float cr = 128.0 + 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
-  if (cb < 72.0 || cb > 132.0 || cr < 130.0 || cr > 178.0) return 0.0;
-  float w = 1.0 - max(abs(cb - 102.0) / 30.0, abs(cr - 152.0) / 26.0);
-  return w > 0.0 ? min(1.0, w * 1.35) : 0.0;
+vec3 shoulder(vec3 v) {
+  vec3 soft = ${HIGHLIGHT_KNEE.toFixed(1)} + ${HIGHLIGHT_SOFTNESS.toFixed(1)} * (1.0 - exp(-(v - ${HIGHLIGHT_KNEE.toFixed(1)}) / ${HIGHLIGHT_SOFTNESS.toFixed(1)}));
+  return mix(v, soft, step(${HIGHLIGHT_KNEE.toFixed(1)}, v));
 }
 
 vec3 rgbToHsl(vec3 c) {
@@ -123,7 +123,7 @@ void main() {
 
   // 1. Portrait beauty (skin-masked, edge-preserving)
   if (u_hasBeauty) {
-    float skinW = skinWeight(c);
+    float skinW = texture(u_skinMask, ((vec2(p) + 0.5) / ${SKIN_MASK_SCALE.toFixed(1)}) / u_skinMaskSize).r;
     if (skinW > 0.02) {
       if (u_hasSkinBlur) {
         vec3 bl = texelFetch(u_skinBlur, p, 0).rgb * 255.0;
@@ -215,10 +215,19 @@ void main() {
 
   // 11. Film grain (same integer hash as the CPU path)
   if (u_grainAmount > 0.0) {
-    uint h = ((uint(p.x) * 374761393u + uint(p.y) * 668265263u) ^ 0x5bf03635u) % 256u;
-    c += (float(h) / 255.0 - 0.5) * u_grainAmount;
+    uint h = (uint(p.x) * 0x27d4eb2du) ^ (uint(p.y) * 0x165667b1u);
+    h ^= h >> 15u;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13u;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16u;
+    c += (float(h & 255u) / 255.0 - 0.5) * u_grainAmount;
   }
 
+  // Highlight shoulder (same as rollOff in imagePipeline.js).
+  vec3 base = srcPx.rgb * 255.0;
+  vec3 rolled = base + shoulder(c) - shoulder(base);
+  c = mix(c, rolled, step(base, c));
   o = vec4(clamp(c, 0.0, 255.0) / 255.0, srcPx.a);
 }`;
 
@@ -300,6 +309,16 @@ function createEngine() {
     main: link(gl, vertex, MAIN),
     sharpen: link(gl, vertex, SHARPEN),
     vao: gl.createVertexArray(),
+    skinTex: (() => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+      return t;
+    })(),
     fbo: gl.createFramebuffer(),
     textures: [],
     size: null,
@@ -406,15 +425,25 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
     boxBlur(e, srcTex, scratchTex, clarityTex, Math.max(3, Math.round(minSide / 140)));
   }
 
+  const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
+  let skinSize = [1, 1];
+  if (hasBeauty) {
+    const skin = getSkinMask(srcImageData);
+    gl.bindTexture(gl.TEXTURE_2D, e.skinTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, skin.width, skin.height, 0, gl.RED, gl.UNSIGNED_BYTE, skin.mask);
+    skinSize = [skin.width, skin.height];
+  }
+
   const sharpen = adjustments.sharpen > 0;
   const mainTarget = sharpen ? scratchTex : outTex;
   runPass(
     e,
     e.main,
     mainTarget,
-    [['u_src', srcTex], ['u_skinBlur', skinTex], ['u_clarityBlur', clarityTex], ['u_fineBlur', fineTex]],
+    [['u_src', srcTex], ['u_skinBlur', skinTex], ['u_clarityBlur', clarityTex], ['u_fineBlur', fineTex], ['u_skinMask', e.skinTex]],
     (g, u) => {
-      g.uniform1i(u.u_hasBeauty, beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0 ? 1 : 0);
+      g.uniform1i(u.u_hasBeauty, hasBeauty ? 1 : 0);
+      g.uniform2f(u.u_skinMaskSize, skinSize[0], skinSize[1]);
       g.uniform1i(u.u_hasSkinBlur, hasSkinBlur ? 1 : 0);
       g.uniform1i(u.u_hasClarity, clarity !== 0 ? 1 : 0);
       g.uniform1i(u.u_hasHsl, hasHslChanges(adjustments.hsl) ? 1 : 0);

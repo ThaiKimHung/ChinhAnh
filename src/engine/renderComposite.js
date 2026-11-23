@@ -7,11 +7,12 @@ import {
   DEFAULT_FRAME,
   DEFAULT_LOGO,
   DEFAULT_TEXT,
+  bokehBackdrop,
   compositeWithBackground,
   renderTextAndFrame,
 } from './imagePipeline';
 import { processImage } from './gpuPipeline';
-import { imageDataToCanvas, imageSizeOf, rasterize, readImage, workingSizeOf } from './canvasUtils';
+import { imageSizeOf, rasterize, readImage, workingSizeOf } from './canvasUtils';
 
 /** Runs color/beauty processing, cutout matte, background compositing and text/frame overlay. */
 export function renderCompositeCanvas({
@@ -49,7 +50,9 @@ export function renderCompositeCanvas({
 
   let finalCanvas = fgCanvas;
   if (useCutout) {
-    const backdropSrc = bgState.mode === 'bokeh' ? imageDataToCanvas(workData) : origCanvas;
+    const backdropSrc = bgState.mode === 'bokeh'
+      ? bokehBackdrop(workData, cutoutAlpha, (bgState.blurAmount || 12) * resolutionScale)
+      : origCanvas;
     finalCanvas = compositeWithBackground(fgCanvas, backdropSrc, bgState, resolutionScale);
   }
 

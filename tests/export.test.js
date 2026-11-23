@@ -66,14 +66,37 @@ test('original rendering preserves fine detail while resampling brush changes an
   const result = buildOriginalSource(source, {
     geometry: [],
     origData: imageData([50, 50]),
-    workData: imageData([50, 90]),
+    workData: imageData([50, 54]),
     cutoutAlpha: new Uint8ClampedArray([0, 255]),
   });
 
-  assert.deepEqual(Array.from(result.workData.data).filter((_, i) => i % 4 === 0), [25, 85, 50, 120]);
+  // Small retouching changes are added on top of the full-resolution pixels.
+  assert.deepEqual(Array.from(result.workData.data).filter((_, i) => i % 4 === 0), [25, 76, 23, 84]);
   assert.deepEqual(Array.from(result.cutoutAlpha), [0, 64, 191, 255]);
   assert.equal(result.origCanvas.width, 4);
   assert.equal(result.origCanvas.height, 1);
+});
+
+test('original rendering does not bring back sharp detail of an object removed in the edit', (t) => {
+  const W = 16;
+  const row = Array.from({ length: W }, (_, x) => (x === 8 ? 30 : 150));
+  const source = { width: W, height: 1, data: new Uint8ClampedArray(row.flatMap((v) => [v, v, v, 255])) };
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => ({ getContext: () => ({ drawImage() {}, getImageData: () => source }) }),
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+  const small = (values) => ({ width: values.length, height: 1, data: new Uint8ClampedArray(values.flatMap((v) => [v, v, v, 255])) });
+
+  const { workData } = buildOriginalSource(source, {
+    origData: small([150, 150, 120, 150]), // the wire averaged into one working pixel
+    workData: small([150, 150, 150, 150]), // removed in the edit
+  });
+
+  const reds = Array.from(workData.data).filter((_, i) => i % 4 === 0);
+  assert.ok(Math.abs(reds[8] - 150) <= 6, `wire pixel came back as ${reds[8]}`);
+  assert.ok(reds.every((v) => v >= 140), `ghost halo ${reds}`);
+  assert.equal(reds[0], 150, 'untouched pixels keep their full-resolution value');
 });
 
 test('original rendering resamples alpha corrections without reviving hidden colors', (t) => {

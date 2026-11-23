@@ -202,3 +202,37 @@ test('maximum skin smoothing keeps fine pore texture instead of a waxy flat surf
   const kept = std(out.data) / std(img.data);
   assert.ok(kept >= 0.5 && kept <= 0.8, `texture kept ${kept.toFixed(2)}`);
 });
+
+test('brightening rolls highlights off smoothly instead of clipping skin to pure red', () => {
+  const skin = [205, 146, 128, 255];
+  const img = new ImageData(new Uint8ClampedArray([...skin, 120, 120, 120, 255, 250, 250, 250, 255]), 3, 1);
+  const adj = { ...DEFAULT_ADJUSTMENTS, exposure: 25, temperature: 28, vibrance: 20 };
+  const out = processImagePipeline(img, adj, DEFAULT_BEAUTY).data;
+  assert.ok(out[0] < 252, `red ${out[0]} still has headroom`);
+  assert.ok(out[0] > out[1] && out[1] > out[2], 'skin keeps its warm order');
+  // Unchanged settings leave pixels untouched, including bright ones.
+  const same = processImagePipeline(img, DEFAULT_ADJUSTMENTS, DEFAULT_BEAUTY).data;
+  assert.deepEqual([...same], [...img.data]);
+});
+
+test('film grain is random-looking, not diagonal stripes', () => {
+  const W = 128, H = 128;
+  const img = new ImageData(W, H);
+  for (let p = 0; p < W * H; p++) img.data.set([128, 128, 128, 255], p * 4);
+  const out = processImagePipeline(img, { ...DEFAULT_ADJUSTMENTS, grain: 100 }, DEFAULT_BEAUTY).data;
+  const v = (x, y) => out[(y * W + x) * 4] - 128;
+  const corr = (dx, dy) => {
+    let s = 0, a = 0, b = 0;
+    for (let y = 2; y < H - 2; y++) {
+      for (let x = 2; x < W - 2; x++) {
+        s += v(x, y) * v(x + dx, y + dy);
+        a += v(x, y) ** 2;
+        b += v(x + dx, y + dy) ** 2;
+      }
+    }
+    return s / Math.sqrt(a * b);
+  };
+  for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1], [2, 1], [1, 2]]) {
+    assert.ok(Math.abs(corr(dx, dy)) < 0.1, `correlation at (${dx},${dy}) = ${corr(dx, dy).toFixed(2)}`);
+  }
+});

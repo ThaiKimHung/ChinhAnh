@@ -105,18 +105,50 @@ function localColorField(data, alpha, width, height, radius, include) {
 function recoverFineDetail(data, alpha, width, height, scale, handled) {
   const radius = Math.min(48, Math.max(4, Math.round(10 * scale)));
   const field = localColorField(data, alpha, width, height, radius, (a) => a <= 8);
+  // Mattes often leave a wide semi-transparent band around hair; look further
+  // out for clean background when none is close.
+  const farField = localColorField(data, alpha, width, height, Math.min(160, radius * 4), (a) => a <= 8);
+  const fgField = localColorField(data, alpha, width, height, radius * 2, (a) => a >= 247);
   const opacity = new Float32Array(width * height).fill(1);
   for (let p = 0; p < alpha.length; p++) {
     const a8 = alpha[p];
     const i = p * 4;
     if (a8 <= 8 || a8 >= 247 || data[i + 3] !== 255) continue;
-    const coverage = field[i + 3];
+    const near = field[i + 3] >= 1;
+    const source = near ? field : farField;
+    const coverage = source[i + 3];
     if (coverage < 1) continue;
-    const B = [field[i] / coverage, field[i + 1] / coverage, field[i + 2] / coverage];
+    const B = [source[i] / coverage, source[i + 1] / coverage, source[i + 2] / coverage];
     const difference = Math.max(Math.abs(data[i] - B[0]), Math.abs(data[i + 1] - B[1]), Math.abs(data[i + 2] - B[2]));
-    const a = a8 / 255;
-    // Low-alpha pixels that look exactly like the old background are matte haze.
-    if (a8 < 128) opacity[p] = Math.min(1, Math.max(0, (difference - 6) / 18));
+    let a = a8 / 255;
+    // Where solid subject colour is known nearby, the pixel's position between
+    // background and subject colour tells how opaque it really is. AI mattes
+    // often make fine strands too opaque; trust the colour when it says less.
+    const fgCoverage = fgField[i + 3];
+    let thinned = 1;
+    if (fgCoverage >= 1) {
+      const F = [fgField[i] / fgCoverage, fgField[i + 1] / fgCoverage, fgField[i + 2] / fgCoverage];
+      const fb = [F[0] - B[0], F[1] - B[1], F[2] - B[2]];
+      const contrast = fb[0] * fb[0] + fb[1] * fb[1] + fb[2] * fb[2];
+      if (contrast >= 40 * 40) {
+        const ib = [data[i] - B[0], data[i + 1] - B[1], data[i + 2] - B[2]];
+        const t = (ib[0] * fb[0] + ib[1] * fb[1] + ib[2] * fb[2]) / contrast;
+        // Only when the pixel really is a blend of these two colours (e.g. not a
+        // skin-coloured edge next to dark hair).
+        const residual = ib[0] * ib[0] + ib[1] * ib[1] + ib[2] * ib[2] - Math.max(0, t) * t * contrast;
+        const fromColour = Math.min(1, Math.max(0, t * 1.15 + 0.03));
+        if (residual < 0.15 * contrast + 200 && fromColour < a) {
+          thinned = fromColour / a;
+          a = Math.max(fromColour, 0.02);
+        }
+      }
+    }
+    // Pixels that look exactly like the old background are matte haze. At low
+    // alpha they fade fully; towards opaque the fade eases off so a subject
+    // whose colour happens to match the backdrop keeps a solid edge.
+    const backgroundLike = Math.min(1, Math.max(0, (difference - 6) / 18));
+    const trust = a8 < 128 ? 0 : ((a8 - 128) / 119) ** 2;
+    opacity[p] = (backgroundLike + (1 - backgroundLike) * trust) * thinned;
     for (let c = 0; c < 3; c++) {
       const F = (data[i + c] - (1 - a) * B[c]) / a;
       data[i + c] = F < 0 ? 0 : F > 255 ? 255 : F;
