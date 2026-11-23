@@ -23,6 +23,31 @@ test('a hard-edged paste copies the source exactly', () => {
   assert.deepEqual(px(img, 35, 15), [20, 40, 60, 255], 'outside the pasted area is untouched');
 });
 
+test('an opaque patch fills a transparent destination even when only alpha changes', () => {
+  const img = image(20, 10, (x) => [200, 20, 10, x < 10 ? 255 : 0]);
+  assert.equal(pastePatch(img, { x: 0, y: 0, w: 10, h: 10 }, 10, 0, { feather: 0, toneMatch: false }), true);
+  assert.deepEqual(px(img, 15, 5), [200, 20, 10, 255]);
+});
+
+test('a semitransparent patch blends with the destination instead of covering it', () => {
+  const img = image(20, 10, (x) => (x < 10 ? [200, 20, 10, 128] : [20, 40, 150, 255]));
+  pastePatch(img, { x: 0, y: 0, w: 10, h: 10 }, 10, 0, { feather: 0, toneMatch: false });
+  assert.deepEqual(px(img, 15, 5), [110, 30, 80, 255]);
+});
+
+test('feathering a patch onto transparency fades alpha without mixing invisible colors', () => {
+  const img = image(20, 10, (x) => (x < 10 ? [200, 20, 10, 255] : [30, 90, 255, 0]));
+  pastePatch(img, { x: 0, y: 0, w: 10, h: 10 }, 10, 0, { feather: 2, toneMatch: false });
+  assert.deepEqual(px(img, 10, 5), [200, 20, 10, 40]);
+  assert.deepEqual(px(img, 15, 5), [200, 20, 10, 255]);
+});
+
+test('transparent source pixels leave the destination unchanged', () => {
+  const img = image(20, 10, (x) => (x < 10 ? [200, 20, 10, 0] : [20, 40, 150, 128]));
+  assert.equal(pastePatch(img, { x: 0, y: 0, w: 10, h: 10 }, 10, 0, { feather: 0, toneMatch: false }), false);
+  assert.deepEqual(px(img, 15, 5), [20, 40, 150, 128]);
+});
+
 test('feathering blends the edge but keeps the centre fully pasted', () => {
   const img = image(60, 30, (x) => (x < 30 ? [200, 200, 200, 255] : [0, 0, 0, 255]));
   pastePatch(img, { x: 2, y: 2, w: 24, h: 24 }, 32, 0, { feather: 6, toneMatch: false });

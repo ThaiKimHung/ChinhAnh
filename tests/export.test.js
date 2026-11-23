@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildOriginalSource,
+  canRenderOriginalExport,
   createZip,
   encodeCanvas,
   getTransformedSize,
@@ -18,11 +19,11 @@ test('original dimensions apply the same edit geometry at source size', () => {
     { type: 'straighten', angle: 30 },
   ];
   assert.deepEqual(getTransformedSize({ width: 4000, height: 3000 }, operations), {
-    width: 804,
-    height: 1608,
+    width: 803,
+    height: 1607,
   });
   assert.deepEqual(getTransformedSize({ width: 1600, height: 1200 }, operations), {
-    width: 322,
+    width: 321,
     height: 643,
   });
 });
@@ -44,6 +45,26 @@ test('a crop ending at the right and bottom edges stays inside a small source', 
   assert.equal(result.width, 3);
   assert.equal(result.height, 3);
   assert.deepEqual(drawArgs, [source, 17, 17, 3, 3, 0, 0, 3, 3]);
+});
+
+test('straightening a small source reports the in-bounds canvas dimensions', (t) => {
+  const source = { width: 12, height: 12 };
+  const operation = { type: 'straighten', angle: 10 };
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => ({ getContext: () => ({ translate() {}, rotate() {}, drawImage() {} }) }),
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  assert.deepEqual(getTransformedSize(source, [operation]), { width: 10, height: 10 });
+  const result = transformImageCanvas(source, operation);
+  assert.deepEqual([result.width, result.height], [10, 10]);
+});
+
+test('original export checks the decoded source size even when there is a smaller crop', () => {
+  const cropped = { width: 4000, height: 3000 };
+  assert.equal(canRenderOriginalExport({ width: 8000, height: 6000 }, cropped), false);
+  assert.equal(canRenderOriginalExport({ width: 6000, height: 4000 }, cropped), true);
 });
 
 test('original rendering preserves fine detail while resampling brush changes and the cutout mask', (t) => {
@@ -116,6 +137,28 @@ test('original rendering resamples alpha corrections without reviving hidden col
   });
 
   assert.deepEqual(Array.from(workData.data), [0, 0, 0, 0, 240, 0, 0, 191]);
+});
+
+test('original rendering leaves erased fine alpha detail invisible and preserves unedited alpha', (t) => {
+  const imageData = (alphas) => ({
+    width: alphas.length,
+    height: 1,
+    data: new Uint8ClampedArray(alphas.flatMap((alpha) => [211, 30, 12, alpha])),
+  });
+  const source = imageData([255, 0, 255, 0, 255, 0, 255, 0]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => ({ getContext: () => ({ drawImage() {}, getImageData: () => source }) }),
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const { workData } = buildOriginalSource(source, {
+    origData: imageData([128, 128, 128, 128]),
+    workData: imageData([128, 128, 0, 0]),
+  });
+
+  assert.deepEqual(Array.from(workData.data.subarray(0, 12)).filter((_, i) => i % 4 === 3), [255, 0, 255]);
+  assert.deepEqual(Array.from(workData.data.subarray(20)), Array(12).fill(0));
 });
 
 test('export names normalize Vietnamese text, avoid paths and deduplicate case-insensitively', () => {

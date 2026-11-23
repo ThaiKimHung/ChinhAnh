@@ -14,6 +14,14 @@ const CROP_HANDLES = [
   { id: 'w', cls: '-left-1.5 top-1/2 -translate-y-1/2 cursor-ew-resize' },
 ];
 
+const INSPECTION_BACKGROUNDS = [
+  { value: 'checkerboard', label: 'Caro', className: 'checkerboard-bg' },
+  { value: 'white', label: 'Trắng', className: 'bg-white' },
+  { value: 'black', label: 'Đen', className: 'bg-black' },
+];
+
+const INSPECTION_BUTTON = 'min-h-9 rounded-md px-2 text-xs font-medium hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-amber-400 aria-pressed:bg-amber-400 aria-pressed:text-[#0f1116]';
+
 export default function CanvasStage({
   hasImage,
   displayCanvas,
@@ -25,6 +33,10 @@ export default function CanvasStage({
   setPan,
   splitView,
   isComparingOriginal,
+  inspectionBackground,
+  onInspectionBackground,
+  onInspectionZoom,
+  onZoomFit,
   isBrushActive,
   brushSize,
   onStrokeStart,
@@ -125,6 +137,7 @@ export default function CanvasStage({
       ctx.beginPath();
       ctx.rect(0, 0, splitX, canvas.height);
       ctx.clip();
+      ctx.clearRect(0, 0, splitX, canvas.height);
       ctx.drawImage(originalCanvas, 0, 0);
       ctx.restore();
     } else {
@@ -430,6 +443,7 @@ export default function CanvasStage({
   };
 
   const displayBrushPx = brushSize * 2 * zoom;
+  const backgroundClass = INSPECTION_BACKGROUNDS.find(({ value }) => value === inspectionBackground)?.className ?? 'checkerboard-bg';
 
   return (
     <main
@@ -459,7 +473,7 @@ export default function CanvasStage({
         }
       }}
       className={`min-h-0 flex-1 relative overflow-hidden bg-[#0c0e13] flex items-center justify-center ${hasImage ? 'touch-none' : ''} ${
-        spaceDown || isPanning
+        spaceDown || isPanning || inspectionBackground
           ? 'cursor-grab active:cursor-grabbing'
           : pickingCloneSource || patchActive
           ? 'cursor-crosshair'
@@ -476,6 +490,44 @@ export default function CanvasStage({
           backgroundSize: '22px 22px',
         }}
       />
+
+      {hasImage && inspectionBackground && (
+        <div className="pointer-events-none absolute inset-x-2 bottom-2 z-30 flex justify-center">
+          <div
+            role="group"
+            aria-label="Soi viền và chi tiết ảnh"
+            onPointerDown={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+            className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-0.5 rounded-lg border border-slate-600 bg-[#14171f]/95 p-1 text-slate-200 shadow-lg"
+          >
+            <button type="button" className={INSPECTION_BUTTON} onClick={onZoomFit}>Vừa khung</button>
+            {[1, 2].map((level) => (
+              <button
+                key={level}
+                type="button"
+                className={INSPECTION_BUTTON}
+                aria-pressed={zoom === level}
+                onClick={() => onInspectionZoom(level)}
+              >
+                {level * 100}%
+              </button>
+            ))}
+            <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-slate-600" />
+            {INSPECTION_BACKGROUNDS.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                aria-label={`Nền soi ${label.toLocaleLowerCase('vi')}`}
+                aria-pressed={inspectionBackground === value}
+                className={INSPECTION_BUTTON}
+                onClick={() => onInspectionBackground(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {!hasImage ? (
         <div
@@ -513,7 +565,7 @@ export default function CanvasStage({
         </div>
       ) : (
         <div
-          className="relative shrink-0 shadow-2xl checkerboard-bg overflow-hidden"
+          className={`relative shrink-0 shadow-2xl overflow-hidden ${backgroundClass}`}
           style={{
             transform: `translate(${pan.x}px, ${pan.y}px)`,
           }}
@@ -526,6 +578,7 @@ export default function CanvasStage({
               width: imageSize ? `${imageSize.width * zoom}px` : 'auto',
               height: imageSize ? `${imageSize.height * zoom}px` : 'auto',
               display: 'block',
+              imageRendering: inspectionBackground && zoom > 1 && Number.isInteger(zoom) ? 'pixelated' : undefined,
               transform: straightenAngle !== 0 ? `rotate(${straightenAngle}deg) scale(${1 + Math.abs(straightenAngle) * 0.018})` : undefined,
               transition: straightenAngle !== 0 ? 'transform 0.05s linear' : undefined,
             }}
@@ -564,8 +617,8 @@ export default function CanvasStage({
                 setDraggingText(true);
               }}
               style={{
-                left: `${textPos.x}%`,
-                top: `${textPos.y}%`,
+                left: `${(displayCanvas?.textAnchor ?? textPos).x}%`,
+                top: `${(displayCanvas?.textAnchor ?? textPos).y}%`,
               }}
               title="Kéo để di chuyển chữ trực tiếp"
               className="absolute -translate-x-1/2 -translate-y-1/2 z-20 px-2.5 py-1 rounded-full border border-dashed border-amber-400 bg-black/45 text-[10px] font-semibold text-amber-300 cursor-move hover:bg-amber-500/20 select-none"

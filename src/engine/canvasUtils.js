@@ -1,4 +1,4 @@
-import { isSupportedCanvasSize, transformImageCanvas } from './exportImage';
+import { isSupportedCanvasSize, transformImageCanvas } from './exportImage.js';
 
 export function cloneImageData(imgData) {
   return new ImageData(new Uint8ClampedArray(imgData.data), imgData.width, imgData.height);

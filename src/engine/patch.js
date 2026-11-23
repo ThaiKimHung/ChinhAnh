@@ -136,8 +136,16 @@ export function pastePatch(imageData, rect, dx, dy, { feather = 8, toneMatch = t
       const s = (j * w + i) * 4;
       if (src[s + 3] === 0) continue;
       const edgeDistance = Math.min(i, w - 1 - i, j, h - 1 - j);
-      const a = fw > 0 ? smoothstep(0, fw, edgeDistance + 0.5) : 1;
-      if (a <= 0) continue;
+      const coverage = fw > 0 ? smoothstep(0, fw, edgeDistance + 0.5) : 1;
+      const sourceAlpha = src[s + 3] * coverage;
+      const previousAlpha = data[d + 3];
+      const destinationAlpha = previousAlpha * (1 - sourceAlpha / 255);
+      const outputAlpha = sourceAlpha + destinationAlpha;
+      data[d + 3] = outputAlpha;
+      if (data[d + 3] === 0) continue;
+      if (data[d + 3] !== previousAlpha) changed = true;
+      // Store straight RGB after blending the premultiplied contributions.
+      const sourceWeight = sourceAlpha / outputAlpha;
       const u = w > 1 ? i / (w - 1) : 0;
       for (let c = 0; c < 3; c++) {
         let correction = 0;
@@ -148,9 +156,9 @@ export function pastePatch(imageData, rect, dx, dy, { feather = 8, toneMatch = t
               + (1 - u) * v * bottom[0][c] + u * v * bottom[w - 1][c]);
         }
         const value = clamp255(src[s + c] + correction);
-        const next = data[d + c] * (1 - a) + value * a;
-        if (Math.round(next) !== data[d + c]) changed = true;
-        data[d + c] = next;
+        const previous = data[d + c];
+        data[d + c] = previous * (1 - sourceWeight) + value * sourceWeight;
+        if (data[d + c] !== previous) changed = true;
       }
     }
   }

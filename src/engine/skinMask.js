@@ -15,17 +15,51 @@ const SIGMA_CB = 8;
 const SIGMA_CR = 7;
 const DEFAULT_PEAK = { cb: 108, cr: 153 };
 
+/**
+ * YCbCr with the chroma of dark pixels scaled up to what it would be at a
+ * normal brightness: Cb/Cr shrink toward 128 as a colour gets darker, so dark
+ * or deeper skin tones would otherwise fall outside the skin range.
+ */
 function chroma(r, g, b) {
+  const y = 0.299 * r + 0.587 * g + 0.114 * b;
+  const k = Math.min(3, Math.max(1, 140 / Math.max(1, y)));
   return {
-    y: 0.299 * r + 0.587 * g + 0.114 * b,
-    cb: 128 - 0.168736 * r - 0.331264 * g + 0.5 * b,
-    cr: 128 + 0.5 * r - 0.418688 * g - 0.081312 * b,
+    y,
+    cb: 128 + (-0.168736 * r - 0.331264 * g + 0.5 * b) * k,
+    cr: 128 + (0.5 * r - 0.418688 * g - 0.081312 * b) * k,
   };
 }
 
-/** Chroma peak of skin-like pixels (falls back to a typical skin tone). */
-export function findSkinTone(data, width, height) {
-  const CB0 = 80, CR0 = 130, BINS_CB = 56, BINS_CR = 50;
+/** Luminance below which a pixel is too dark to judge: adapts to dark photos. */
+function darkLimit(data, width, height) {
+  const hist = new Uint32Array(256);
+  let n = 0;
+  const step = Math.max(1, Math.floor(Math.sqrt((width * height) / 40000)));
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      hist[Math.round(chroma(data[i], data[i + 1], data[i + 2]).y)]++;
+      n++;
+    }
+  }
+  let acc = 0, p05 = 0;
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v];
+    if (acc >= n * 0.05) {
+      p05 = v;
+      break;
+    }
+  }
+  return Math.min(45, Math.max(10, p05 + 6));
+}
+
+/**
+ * Chroma peak of skin-like pixels (falls back to a typical skin tone). Pixels
+ * near the upper middle of the frame count more: that is where faces are,
+ * while tops, tables and backdrops fill the bottom and the edges.
+ */
+export function findSkinTone(data, width, height, lumLow = 50) {
+  const CB0 = 70, CR0 = 130, BINS_CB = 60, BINS_CR = 62;
   const hist = new Float32Array(BINS_CB * BINS_CR);
   const step = Math.max(1, Math.floor(Math.sqrt((width * height) / 160000)));
   for (let y = 0; y < height; y += step) {
@@ -33,16 +67,22 @@ export function findSkinTone(data, width, height) {
       const i = (y * width + x) * 4;
       if (data[i + 3] < 128) continue;
       const { y: lum, cb, cr } = chroma(data[i], data[i + 1], data[i + 2]);
-      if (lum < 50 || lum > 245) continue;
+      if (lum < lumLow || lum > 245) continue;
       const bcb = Math.round(cb - CB0), bcr = Math.round(cr - CR0);
       if (bcb < 0 || bcb >= BINS_CB || bcr < 0 || bcr >= BINS_CR) continue;
       // Typical skin redness prior: keeps a warm backdrop from winning.
-      hist[bcr * BINS_CB + bcb] += Math.exp(-((cr - 153) ** 2) / (2 * 10 * 10));
+      const u = x / width - 0.5, v = y / height - 0.38;
+      const central = Math.exp(-(u * u) / (2 * 0.2 * 0.2) - (v * v) / (2 * 0.18 * 0.18));
+      // Broad redness prior covering light to deep skin tones; pixels near the
+      // dark limit have noisy (amplified) chroma and count less.
+      const reliable = Math.min(1, (lum - lumLow) / 30);
+      hist[bcr * BINS_CB + bcb] += Math.exp(-((cr - 160) ** 2) / (2 * 18 * 18)) * (0.03 + central) * reliable;
     }
   }
+  // Only skin-plausible chroma can be the peak (Cr 140–188, Cb 75–125).
   let best = -1, peak = null;
-  for (let r = 1; r < BINS_CR - 1; r++) {
-    for (let c = 1; c < BINS_CB - 1; c++) {
+  for (let r = Math.max(1, 140 - CR0); r < Math.min(BINS_CR - 1, 189 - CR0); r++) {
+    for (let c = Math.max(1, 75 - CB0); c < Math.min(BINS_CB - 1, 126 - CB0); c++) {
       let s = 0;
       for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) s += hist[(r + dr) * BINS_CB + c + dc];
       if (s > best) {
@@ -51,7 +91,7 @@ export function findSkinTone(data, width, height) {
       }
     }
   }
-  if (!peak || best < 30 || peak.cr < 142 || peak.cr > 172 || peak.cb < 88 || peak.cb > 125) return { ...DEFAULT_PEAK };
+  if (!peak || best < 5) return { ...DEFAULT_PEAK };
   return peak;
 }
 
@@ -84,7 +124,8 @@ function boxBlurMap(map, w, h, radius) {
 /** Builds the quarter-resolution skin map: { mask (Uint8Array), width, height, tone }. */
 export function computeSkinMask(imageData) {
   const { width, height, data } = imageData;
-  const tone = findSkinTone(data, width, height);
+  const lumLow = darkLimit(data, width, height);
+  const tone = findSkinTone(data, width, height, lumLow);
   const lw = Math.ceil(width / SKIN_MASK_SCALE);
   const lh = Math.ceil(height / SKIN_MASK_SCALE);
   const sum = new Float32Array(lw * lh);
@@ -99,14 +140,20 @@ export function computeSkinMask(imageData) {
       const { y: lum, cb, cr } = chroma(data[i], data[i + 1], data[i + 2]);
       const dcb = cb - tone.cb, dcr = cr - tone.cr;
       const w = Math.exp(-(dcb * dcb) / (2 * SIGMA_CB * SIGMA_CB) - (dcr * dcr) / (2 * SIGMA_CR * SIGMA_CR));
-      const lumGate = Math.min(1, Math.max(0, (lum - 45) / 35));
+      const lumGate = Math.min(1, Math.max(0, (lum - lumLow) / 30));
       sum[l] += w * lumGate;
     }
   }
   for (let l = 0; l < sum.length; l++) sum[l] = count[l] ? sum[l] / count[l] : 0;
   const smooth = boxBlurMap(boxBlurMap(sum, lw, lh, 1), lw, lh, 1);
+  // Skin almost never fills the whole frame; when "skin" does, it is wood,
+  // sand or a wall of that colour, so fade the mask out.
+  let total = 0;
+  for (let l = 0; l < smooth.length; l++) total += Math.min(1, smooth[l] * 1.25);
+  const coverage = total / smooth.length;
+  const trust = Math.min(1, Math.max(0, (0.85 - coverage) / 0.25));
   const mask = new Uint8Array(lw * lh);
-  for (let l = 0; l < mask.length; l++) mask[l] = Math.round(Math.min(1, smooth[l] * 1.25) * 255);
+  for (let l = 0; l < mask.length; l++) mask[l] = Math.round(Math.min(1, smooth[l] * 1.25) * trust * 255);
   return { mask, width: lw, height: lh, tone };
 }
 

@@ -182,15 +182,18 @@ test('maximum skin smoothing keeps fine pore texture instead of a waxy flat surf
   const img = new ImageData(W, H);
   let seed = 7;
   const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  // A face-sized patch of textured skin in the middle of a grey backdrop.
   for (let p = 0; p < W * H; p++) {
     const n = (rnd() - 0.5) * 24;
-    img.data.set([214 + n, 170 + n, 150 + n, 255], p * 4);
+    const x = p % W, y = Math.floor(p / W);
+    const face = (x - 180) ** 2 / 150 ** 2 + (y - 170) ** 2 / 165 ** 2 < 1;
+    img.data.set(face ? [214 + n, 170 + n, 150 + n, 255] : [110 + n, 118 + n, 128 + n, 255], p * 4);
   }
   const out = processImagePipeline(img, DEFAULT_ADJUSTMENTS, { skinSmooth: 100, skinBrighten: 0, skinRosy: 0 });
   const std = (d) => {
     let s = 0, s2 = 0, n = 0;
-    for (let y = 20; y < H - 20; y++) {
-      for (let x = 20; x < W - 20; x++) {
+    for (let y = 110; y < 230; y++) {
+      for (let x = 120; x < 240; x++) {
         const v = d[(y * W + x) * 4 + 1];
         s += v;
         s2 += v * v;
@@ -235,4 +238,104 @@ test('film grain is random-looking, not diagonal stripes', () => {
   for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1], [2, 1], [1, 2]]) {
     assert.ok(Math.abs(corr(dx, dy)) < 0.1, `correlation at (${dx},${dy}) = ${corr(dx, dy).toFixed(2)}`);
   }
+});
+
+test('the "keep" mask brush restores strands but not plain old background', () => {
+  const W = 60, H = 40;
+  const img = new ImageData(W, H);
+  const alpha = new Uint8ClampedArray(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const p = y * W + x;
+      const hair = x < 15 || x === 32; // solid hair on the left, one lost strand at x = 32
+      img.data.set(hair ? [30, 25, 20, 255] : [120, 135, 150, 255], p * 4);
+      alpha[p] = x < 15 ? 255 : 0;
+    }
+  }
+  for (let y = 5; y < 35; y += 3) applyAlphaMaskBrushStroke(alpha, W, H, 32, y, 8, 1, 'keep', img);
+  assert.ok(alpha[20 * W + 32] > 200, `strand alpha ${alpha[20 * W + 32]}`);
+  assert.ok(alpha[20 * W + 36] < 20, `background alpha ${alpha[20 * W + 36]}`);
+});
+
+function sceneImage(map) {
+  const W = 160, H = 120;
+  const img = new ImageData(W, H);
+  let s = 5;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      const u = (x / W) * 0.6 + (y / H) * 0.3 + (s % 100) / 1000; // 0..1, photo-like spread
+      const v = 25 + u * 200;
+      img.data.set(map([v * 1.05, v, v * 0.92]).concat(255), (y * W + x) * 4);
+    }
+  }
+  return img;
+}
+
+function lumaStats(img) {
+  const l = [];
+  for (let i = 0; i < img.data.length; i += 4) l.push(0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2]);
+  l.sort((a, b) => a - b);
+  const crushed = l.filter((v) => v <= 3).length / l.length;
+  const clipped = l.filter((v) => v >= 252).length / l.length;
+  return { median: l[l.length >> 1], crushed, clipped };
+}
+
+test('auto enhance brings an underexposed photo to a normal brightness without crushing shadows', () => {
+  const dark = sceneImage((c) => c.map((v) => v * 0.35));
+  const out = processImagePipeline(dark, computeAutoEnhance(dark), DEFAULT_BEAUTY);
+  const st = lumaStats(out);
+  assert.ok(st.median >= 95 && st.median <= 140, `median ${st.median}`);
+  assert.ok(st.crushed < 0.03, `crushed ${st.crushed}`);
+});
+
+test('auto enhance tames an overexposed photo without clipping', () => {
+  const bright = sceneImage((c) => c.map((v) => Math.min(255, v * 1.4 + 35)));
+  const out = processImagePipeline(bright, computeAutoEnhance(bright), DEFAULT_BEAUTY);
+  const st = lumaStats(out);
+  assert.ok(st.median >= 100 && st.median <= 160, `median ${st.median}`);
+  assert.ok(st.clipped < 0.03, `clipped ${st.clipped}`);
+});
+
+test('auto enhance leaves a well exposed photo nearly as it is', () => {
+  const ok = sceneImage((c) => c);
+  const auto = computeAutoEnhance(ok);
+  assert.ok(Math.abs(auto.exposure) <= 12, `exposure ${auto.exposure}`);
+  const st = lumaStats(processImagePipeline(ok, auto, DEFAULT_BEAUTY));
+  assert.ok(st.crushed < 0.02 && st.clipped < 0.02, JSON.stringify(st));
+});
+
+test('the smoothing brush keeps pore texture and scrubbing does not keep flattening the skin', () => {
+  const W = 120, H = 80;
+  const make = () => {
+    const img = new ImageData(W, H);
+    let s = 21;
+    for (let p = 0; p < W * H; p++) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      const n = (s % 25) - 12;
+      img.data.set([206 + n, 150 + n, 132 + n, 255], p * 4);
+    }
+    return img;
+  };
+  const spread = (img) => {
+    let a = 0, b = 0, n = 0;
+    for (let y = 30; y < 50; y++) {
+      for (let x = 45; x < 75; x++) {
+        const v = img.data[(y * W + x) * 4 + 1];
+        a += v;
+        b += v * v;
+        n++;
+      }
+    }
+    return Math.sqrt(b / n - (a / n) ** 2);
+  };
+  const orig = make();
+  const before = spread(orig);
+  const once = make();
+  const base = make();
+  for (let x = 30; x <= 90; x += 4) applySkinBrushStroke(once, orig, x, 40, 20, 1, 'smooth', base);
+  const scrubbed = make();
+  for (let k = 0; k < 8; k++) for (let x = 30; x <= 90; x += 4) applySkinBrushStroke(scrubbed, orig, x, 40, 20, 1, 'smooth', base);
+  assert.ok(spread(once) >= before * 0.4, `one pass keeps ${(spread(once) / before).toFixed(2)}`);
+  assert.ok(spread(scrubbed) >= spread(once) * 0.85, `scrubbing ${spread(scrubbed).toFixed(1)} vs ${spread(once).toFixed(1)}`);
 });

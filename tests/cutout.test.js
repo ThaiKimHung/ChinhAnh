@@ -147,3 +147,21 @@ test('a light subject edge next to dark hair is not thinned by colour evidence',
   applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 0 });
   assert.ok(data[(10 * W + 24) * 4 + 3] >= 190, `skin edge alpha ${data[(10 * W + 24) * 4 + 3]}`);
 });
+
+test('feathering also softens outward, using the subject colour rather than the old background', () => {
+  const W = 40, H = 20;
+  const subject = [200, 60, 50];
+  const bg = [40, 140, 210];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const matte = new Uint8ClampedArray(W * H);
+  for (let p = 0; p < W * H; p++) {
+    const inside = p % W < 20;
+    data.set([...(inside ? subject : bg), 255], p * 4);
+    matte[p] = inside ? 255 : 0;
+  }
+  applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 10 });
+  const out = (10 * W + 21) * 4; // just outside the edge
+  assert.ok(data[out + 3] >= 15, `outside alpha ${data[out + 3]}`);
+  assert.ok(Math.abs(data[out] - subject[0]) <= 20 && Math.abs(data[out + 2] - subject[2]) <= 20, `outside colour ${[...data.slice(out, out + 3)]}`);
+  assert.equal(data[(10 * W + 35) * 4 + 3], 0, 'far background stays transparent');
+});

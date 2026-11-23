@@ -13,8 +13,8 @@
 // the GPU's texture limits, or anything fails (the GPU path is then disabled
 // for the session).
 
-import { HIGHLIGHT_KNEE, HIGHLIGHT_SOFTNESS, SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline';
-import { SKIN_MASK_SCALE, getSkinMask } from './skinMask';
+import { HIGHLIGHT_KNEE, HIGHLIGHT_SOFTNESS, SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline.js';
+import { SKIN_MASK_SCALE, getSkinMask } from './skinMask.js';
 
 const VERTEX = `#version 300 es
 void main() {
@@ -29,14 +29,21 @@ uniform sampler2D u_src;
 uniform ivec2 u_size;
 uniform ivec2 u_dir;
 uniform int u_radius;
+uniform bool u_alphaWeighted;
 out vec4 o;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 sum = vec4(0.0);
   for (int k = -u_radius; k <= u_radius; k++) {
-    sum += texelFetch(u_src, clamp(p + u_dir * k, ivec2(0), u_size - 1), 0);
+    vec4 px = texelFetch(u_src, clamp(p + u_dir * k, ivec2(0), u_size - 1), 0);
+    sum += u_alphaWeighted ? vec4(px.rgb * px.a, px.a) : px;
   }
-  o = sum / float(2 * u_radius + 1);
+  float count = float(2 * u_radius + 1);
+  if (u_alphaWeighted) {
+    o = vec4(sum.a > 0.0 ? sum.rgb / sum.a : vec3(0.0), sum.a / count);
+  } else {
+    o = sum / count;
+  }
 }`;
 
 const MAIN = `#version 300 es
@@ -146,10 +153,13 @@ void main() {
 
   // 2. Clarity
   if (u_hasClarity) {
-    vec3 d = c - texelFetch(u_clarityBlur, p, 0).rgb * 255.0;
-    float lum = dot(c, vec3(0.299, 0.587, 0.114)) / 255.0;
-    float midMask = 1.0 - abs(lum - 0.5) * 1.4;
-    c += d * (u_clarityAmount * max(0.2, midMask) * 0.85);
+    vec4 blurred = texelFetch(u_clarityBlur, p, 0);
+    if (blurred.a > 0.0) {
+      vec3 d = c - blurred.rgb * 255.0;
+      float lum = dot(c, vec3(0.299, 0.587, 0.114)) / 255.0;
+      float midMask = 1.0 - abs(lum - 0.5) * 1.4;
+      c += d * (u_clarityAmount * max(0.2, midMask) * 0.85);
+    }
   }
 
   // 3. Exposure
@@ -226,6 +236,9 @@ void main() {
 
   // Highlight shoulder (same as rollOff in imagePipeline.js).
   vec3 base = srcPx.rgb * 255.0;
+  if (u_satFactor == 0.0 && u_vibAmount == 0.0) {
+    base = vec3(dot(base, vec3(0.299, 0.587, 0.114)));
+  }
   vec3 rolled = base + shoulder(c) - shoulder(base);
   c = mix(c, rolled, step(base, c));
   o = vec4(clamp(c, 0.0, 255.0) / 255.0, srcPx.a);
@@ -381,11 +394,12 @@ function runPass(e, pass, target, inputs, setUniforms) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-function boxBlur(e, source, scratch, target, radius) {
+function boxBlur(e, source, scratch, target, radius, alphaWeighted = false) {
   const r = Math.max(1, Math.round(radius));
   const set = (dx, dy) => (gl, u) => {
     gl.uniform2i(u.u_dir, dx, dy);
     gl.uniform1i(u.u_radius, r);
+    gl.uniform1i(u.u_alphaWeighted, alphaWeighted ? 1 : 0);
   };
   runPass(e, e.blur, scratch, [['u_src', source]], set(1, 0));
   runPass(e, e.blur, target, [['u_src', scratch]], set(0, 1));
@@ -422,7 +436,7 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
   }
   const clarity = adjustments.clarity || 0;
   if (clarity !== 0) {
-    boxBlur(e, srcTex, scratchTex, clarityTex, Math.max(3, Math.round(minSide / 140)));
+    boxBlur(e, srcTex, scratchTex, clarityTex, Math.max(3, Math.round(minSide / 140)), true);
   }
 
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;

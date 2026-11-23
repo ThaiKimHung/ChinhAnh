@@ -86,6 +86,34 @@ test('draft hydration restores canvas dimensions, erase mask, and shared history
   assert.deepEqual([...restored.eraseMaskCanvas.image.data], [0, 0, 0, 0, 239, 68, 68, 255]);
 });
 
+test('an unreadable old overlay does not prevent recovering the photo or other overlays', async (t) => {
+  const previousDocument = globalThis.document;
+  t.after(() => { globalThis.document = previousDocument; });
+  globalThis.document = {
+    createElement: () => ({ getContext: () => ({ putImageData() {} }) }),
+  };
+  const origData = pixelData();
+  const workData = pixelData();
+  const valid = new Blob(['valid']);
+  const broken = new Blob(['broken']);
+  const session = {
+    origData,
+    workData,
+    logoConfig: { enabled: true, blob: valid },
+    history: [{ origData, workData, bgState: { mode: 'image', customBgBlob: broken } }],
+  };
+  const recovered = await hydrateSession(session, async (url) => {
+    const file = await (await fetch(url)).text();
+    if (file === 'broken') throw new Error('Decode failed');
+    return { file };
+  });
+  assert.deepEqual(recovered.logoConfig.img, { file: 'valid' });
+  assert.equal(recovered.workData, workData);
+  assert.equal(recovered.history[0].bgState.customBgImg, null);
+  assert.equal(recovered.history[0].bgState.customBgBlob, broken);
+  assert.equal(recovered.history.length, 1);
+});
+
 test('draft writes and deletions compare revisions in the same transaction', async (t) => {
   let persisted;
   let transactions = Promise.resolve();

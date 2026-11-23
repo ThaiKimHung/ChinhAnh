@@ -1,5 +1,5 @@
-import { applyCutoutMatte } from './cutout';
-import { buildOriginalSource, getTransformedSize } from './exportImage';
+import { applyCutoutMatte } from './cutout.js';
+import { buildOriginalSource, getTransformedSize } from './exportImage.js';
 import {
   DEFAULT_ADJUSTMENTS,
   DEFAULT_BEAUTY,
@@ -10,9 +10,9 @@ import {
   bokehBackdrop,
   compositeWithBackground,
   renderTextAndFrame,
-} from './imagePipeline';
-import { processImage } from './gpuPipeline';
-import { imageSizeOf, rasterize, readImage, workingSizeOf } from './canvasUtils';
+} from './imagePipeline.js';
+import { processImage } from './gpuPipeline.js';
+import { imageSizeOf, rasterize, readImage, workingSizeOf } from './canvasUtils.js';
 
 /** Runs color/beauty processing, cutout matte, background compositing and text/frame overlay. */
 export function renderCompositeCanvas({
@@ -38,6 +38,10 @@ export function renderCompositeCanvas({
     bgState.mode !== 'original' &&
     cutoutAlpha.length === processed.width * processed.height;
 
+  const backdrop = useCutout && bgState.mode === 'bokeh'
+    ? bokehBackdrop(processed, cutoutAlpha, (bgState.blurAmount || 12) * resolutionScale)
+    : origCanvas;
+
   if (useCutout) {
     applyCutoutMatte(processed, cutoutAlpha, {
       feather: bgState.feather ?? 0,
@@ -50,14 +54,11 @@ export function renderCompositeCanvas({
 
   let finalCanvas = fgCanvas;
   if (useCutout) {
-    const backdropSrc = bgState.mode === 'bokeh'
-      ? bokehBackdrop(workData, cutoutAlpha, (bgState.blurAmount || 12) * resolutionScale)
-      : origCanvas;
-    finalCanvas = compositeWithBackground(fgCanvas, backdropSrc, bgState, resolutionScale);
+    finalCanvas = compositeWithBackground(fgCanvas, backdrop, bgState, resolutionScale);
   }
 
   const outCtx = finalCanvas.getContext('2d');
-  renderTextAndFrame(outCtx, finalCanvas.width, finalCanvas.height, textConfig, frameConfig, logoConfig);
+  finalCanvas.textAnchor = renderTextAndFrame(outCtx, finalCanvas.width, finalCanvas.height, textConfig, frameConfig, logoConfig);
   return finalCanvas;
 }
 

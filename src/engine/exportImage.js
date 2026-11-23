@@ -1,4 +1,4 @@
-import { straightenCanvas } from './imagePipeline.js';
+import { getStraightenedSize, straightenCanvas } from './imagePipeline.js';
 
 // A full-resolution render can hold several RGBA buffers at the same time.
 const MAX_CANVAS_SIDE = 16384;
@@ -28,16 +28,8 @@ function transformSize({ width, height }, operation) {
       const bounds = cropBounds({ width, height }, operation.rect);
       return { width: bounds.width, height: bounds.height };
     }
-    case 'straighten': {
-      const radians = (operation.angle * Math.PI) / 180;
-      const sin = Math.abs(Math.sin(radians));
-      const cos = Math.abs(Math.cos(radians));
-      const scale = Math.max((width * cos + height * sin) / width, (width * sin + height * cos) / height);
-      return {
-        width: Math.max(20, Math.round(width / scale)),
-        height: Math.max(20, Math.round(height / scale)),
-      };
-    }
+    case 'straighten':
+      return getStraightenedSize({ width, height }, operation.angle);
     default:
       return { width, height };
   }
@@ -50,6 +42,11 @@ export function getTransformedSize(size, operations = []) {
 export function isSupportedCanvasSize({ width, height }) {
   return width > 0 && height > 0 && width <= MAX_CANVAS_SIDE
     && height <= MAX_CANVAS_SIDE && width * height <= MAX_CANVAS_PIXELS;
+}
+
+export function canRenderOriginalExport(originalSize, transformedSize) {
+  return Boolean(transformedSize && isSupportedCanvasSize(originalSize ?? transformedSize)
+    && isSupportedCanvasSize(transformedSize));
 }
 
 function checkCanvasSize(width, height) {
@@ -144,15 +141,23 @@ function buildCorrection(original, edited) {
  * gentle retouching (fine detail survives), but after object removal, liquify,
  * cut & paste or cloning, the full-resolution original still holds the sharp
  * detail of what was removed or moved, which would come back as a ghost.
- * Large colour changes (dilated a little so the full-resolution footprint of a
- * thin object is covered) switch smoothly to the upscaled edit.
+ * Large colour changes switch smoothly to the upscaled edit, with a small
+ * dilation to cover the full footprint of a thin object. Transparency edits
+ * that reach either endpoint also replace the original, without that dilation.
  */
 function buildReplaceWeights(original, edited, width, height) {
   const n = width * height;
   const magnitude = new Float32Array(n);
+  let weights = null;
   let any = false;
   for (let p = 0, i = 0; p < n; p++, i += 4) {
-    const visible = Math.min(original[i + 3], edited[i + 3]) / 255;
+    const oldAlpha = original[i + 3];
+    const newAlpha = edited[i + 3];
+    if (oldAlpha !== newAlpha && (newAlpha === 0 || newAlpha === 255)) {
+      weights ??= new Float32Array(n);
+      weights[p] = 1;
+    }
+    const visible = Math.min(oldAlpha, newAlpha) / 255;
     if (!visible) continue;
     const m = Math.max(
       Math.abs(edited[i] - original[i]),
@@ -162,7 +167,7 @@ function buildReplaceWeights(original, edited, width, height) {
     magnitude[p] = m;
     if (m > REPLACE_FROM) any = true;
   }
-  if (!any) return null;
+  if (!any) return weights;
   // Max filter (radius 2) in both directions, then a smooth ramp.
   const R = 2;
   const tmp = new Float32Array(n);
@@ -173,13 +178,14 @@ function buildReplaceWeights(original, edited, width, height) {
       tmp[y * width + x] = m;
     }
   }
-  const weights = new Float32Array(n);
+  weights ??= new Float32Array(n);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let m = 0;
       for (let k = Math.max(0, y - R); k <= Math.min(height - 1, y + R); k++) m = Math.max(m, tmp[k * width + x]);
       const t = Math.min(1, Math.max(0, (m - REPLACE_FROM) / (REPLACE_FULL - REPLACE_FROM)));
-      weights[y * width + x] = t * t * (3 - 2 * t);
+      const p = y * width + x;
+      weights[p] = Math.max(weights[p], t * t * (3 - 2 * t));
     }
   }
   return weights;

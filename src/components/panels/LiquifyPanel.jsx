@@ -10,6 +10,7 @@ export default function LiquifyPanel({
   liquifyMode,
   setLiquifyMode,
   onResetLiquify,
+  hasCutoutMask,
 }) {
   return (
     <div className="space-y-4">
@@ -19,12 +20,17 @@ export default function LiquifyPanel({
         </h3>
         <button
           onClick={onResetLiquify}
-          title="Đưa mọi chỉnh sửa trực tiếp trên pixel về ảnh gốc"
+          title={hasCutoutMask ? 'Khôi phục pixel ảnh gốc và bỏ mặt nạ tách nền' : 'Khôi phục pixel ảnh gốc'}
           className="text-[11px] text-slate-400 hover:text-rose-400 cursor-pointer"
         >
           Khôi phục pixel toàn ảnh
         </button>
       </div>
+      {hasCutoutMask && (
+        <p className="text-[11px] text-slate-400">
+          Khôi phục toàn ảnh sẽ bỏ mặt nạ tách nền. Bạn có thể hoàn tác.
+        </p>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         {[

@@ -19,12 +19,13 @@ function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-export function createLiquifySession(imageData) {
+export function createLiquifySession(imageData, matte = null) {
   const { width, height, data } = imageData;
   return {
     width,
     height,
     base: new Uint8ClampedArray(data),
+    baseMatte: matte?.length === width * height ? new Uint8ClampedArray(matte) : null,
     fx: new Float32Array(width * height),
     fy: new Float32Array(width * height),
   };
@@ -63,11 +64,11 @@ function sampleImage(data, width, height, x, y, out, o) {
 
 /**
  * Applies one dab ending at (x1, y1) — for push the stroke moved from (x0, y0) —
- * and re-renders the affected pixels of `target` (same size as the session).
+ * and re-renders the affected pixels of `target` and its optional cutout matte.
  * Modes: 'push' | 'bloat' | 'pinch' | 'restore'.
  */
-export function liquifyDab(session, target, x0, y0, x1, y1, radius, strength, mode) {
-  const { width, height, fx, fy, base } = session;
+export function liquifyDab(session, target, x0, y0, x1, y1, radius, strength, mode, targetMatte = null) {
+  const { width, height, fx, fy, base, baseMatte } = session;
   const r = Math.max(8, radius);
   const r2 = r * r;
   const minX = Math.max(0, Math.floor(x1 - r)), maxX = Math.min(width - 1, Math.ceil(x1 + r));
@@ -170,12 +171,16 @@ export function liquifyDab(session, target, x0, y0, x1, y1, radius, strength, mo
     }
   }
 
-  // 3. Render from the base image with one sample per pixel.
+  // 3. Resample the base image and cutout matte at the same source coordinates.
   const out = target.data;
+  const matte = baseMatte && targetMatte?.length === baseMatte.length ? targetMatte : null;
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       const p = y * width + x;
-      sampleImage(base, width, height, x + fx[p], y + fy[p], out, p * 4);
+      const sourceX = x + fx[p];
+      const sourceY = y + fy[p];
+      sampleImage(base, width, height, sourceX, sourceY, out, p * 4);
+      if (matte) matte[p] = sampleField(baseMatte, width, height, sourceX, sourceY);
     }
   }
 }

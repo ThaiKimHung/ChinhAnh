@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   appendHistoryEntry,
+  applyStyleToSession,
   historyBudgetBytes,
   historyBytes,
   HISTORY_MAX_ENTRIES,
@@ -65,6 +66,45 @@ test('parameter-only steps share pixels and stay cheap', () => {
     ({ entries, index } = appendHistoryEntry(entries, index, entry(shared), { maxBytes: 1000 }));
   }
   assert.equal(entries.length, HISTORY_MAX_ENTRIES);
+});
+
+test('an applied batch style adds an undo step without copying the photo or its mask', () => {
+  const work = pixels(10, 10);
+  const latest = pixels(10, 10);
+  const alpha = new Uint8ClampedArray(100);
+  const start = entry(work, {
+    cutoutAlpha: alpha,
+    activePreset: 'original',
+    adjustments: { exposure: 0 },
+    beauty: { skinSmooth: 0 },
+    textConfig: { content: 'Trước khi lưu' },
+  });
+  const session = {
+    ...start,
+    workData: latest,
+    activePreset: 'custom',
+    adjustments: { exposure: 16 },
+    beauty: { skinSmooth: 10 },
+    textConfig: { content: 'Bản nháp hiện tại' },
+    history: [start, entry(pixels(10, 10))],
+    historyIdx: 0,
+  };
+  const styled = applyStyleToSession(session, {
+    activePreset: 'warm',
+    adjustments: { exposure: 25 },
+    beauty: { skinSmooth: 42 },
+  });
+  assert.equal(styled.historyIdx, 1);
+  assert.equal(styled.history.length, 2);
+  assert.equal(styled.history[0].adjustments.exposure, 16);
+  assert.equal(styled.history[1].adjustments.exposure, 25);
+  assert.equal(styled.beauty.skinSmooth, 42);
+  assert.equal(styled.history[0].workData, latest);
+  assert.equal(styled.history[1].workData, latest);
+  assert.equal(styled.history[1].cutoutAlpha, alpha);
+  assert.equal(styled.history[0].textConfig.content, 'Bản nháp hiện tại');
+  assert.equal(styled.history[1].textConfig.content, 'Bản nháp hiện tại');
+  assert.equal(session.history.length, 2);
 });
 
 test('the budget shrinks on low-memory devices', () => {

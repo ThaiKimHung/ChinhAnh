@@ -1,5 +1,6 @@
 import { createLiquifySession, liquifyDab } from './liquify.js';
 import { getSkinMask, sampleSkinMask } from './skinMask.js';
+import { fitOverlay } from './overlayLayout.js';
 
 export const DEFAULT_HSL = {
   red: [0, 0, 0],
@@ -210,9 +211,10 @@ function clamp(v, min = 0, max = 255) {
 }
 
 /**
- * Separable box blur on RGBA buffer for fast surface smoothing.
+ * Separable box blur. Coverage weighting keeps invisible colors out of
+ * RGB averages for operations that derive contrast from the blur.
  */
-function boxBlurRGBA(data, width, height, radius) {
+function boxBlurRGBA(data, width, height, radius, alphaWeighted = false) {
   const r = Math.max(1, Math.round(radius));
   const temp = new Uint8ClampedArray(data.length);
   const out = new Uint8ClampedArray(data.length);
@@ -225,25 +227,29 @@ function boxBlurRGBA(data, width, height, radius) {
     for (let i = -r; i <= r; i++) {
       const cx = Math.min(width - 1, Math.max(0, i));
       const idx = rowOffset + cx * 4;
-      sr += data[idx];
-      sg += data[idx + 1];
-      sb += data[idx + 2];
+      const weight = alphaWeighted ? data[idx + 3] : 1;
+      sr += data[idx] * weight;
+      sg += data[idx + 1] * weight;
+      sb += data[idx + 2] * weight;
       sa += data[idx + 3];
     }
     for (let x = 0; x < width; x++) {
       const outIdx = rowOffset + x * 4;
-      temp[outIdx] = sr / div;
-      temp[outIdx + 1] = sg / div;
-      temp[outIdx + 2] = sb / div;
+      const colorDiv = alphaWeighted ? sa || 1 : div;
+      temp[outIdx] = sr / colorDiv;
+      temp[outIdx + 1] = sg / colorDiv;
+      temp[outIdx + 2] = sb / colorDiv;
       temp[outIdx + 3] = sa / div;
 
       const xRemove = Math.max(0, x - r);
       const xAdd = Math.min(width - 1, x + r + 1);
       const iRem = rowOffset + xRemove * 4;
       const iAdd = rowOffset + xAdd * 4;
-      sr += data[iAdd] - data[iRem];
-      sg += data[iAdd + 1] - data[iRem + 1];
-      sb += data[iAdd + 2] - data[iRem + 2];
+      const addWeight = alphaWeighted ? data[iAdd + 3] : 1;
+      const removeWeight = alphaWeighted ? data[iRem + 3] : 1;
+      sr += data[iAdd] * addWeight - data[iRem] * removeWeight;
+      sg += data[iAdd + 1] * addWeight - data[iRem + 1] * removeWeight;
+      sb += data[iAdd + 2] * addWeight - data[iRem + 2] * removeWeight;
       sa += data[iAdd + 3] - data[iRem + 3];
     }
   }
@@ -254,25 +260,29 @@ function boxBlurRGBA(data, width, height, radius) {
     for (let i = -r; i <= r; i++) {
       const cy = Math.min(height - 1, Math.max(0, i));
       const idx = (cy * width + x) * 4;
-      sr += temp[idx];
-      sg += temp[idx + 1];
-      sb += temp[idx + 2];
+      const weight = alphaWeighted ? temp[idx + 3] : 1;
+      sr += temp[idx] * weight;
+      sg += temp[idx + 1] * weight;
+      sb += temp[idx + 2] * weight;
       sa += temp[idx + 3];
     }
     for (let y = 0; y < height; y++) {
       const outIdx = (y * width + x) * 4;
-      out[outIdx] = sr / div;
-      out[outIdx + 1] = sg / div;
-      out[outIdx + 2] = sb / div;
+      const colorDiv = alphaWeighted ? sa || 1 : div;
+      out[outIdx] = sr / colorDiv;
+      out[outIdx + 1] = sg / colorDiv;
+      out[outIdx + 2] = sb / colorDiv;
       out[outIdx + 3] = sa / div;
 
       const yRemove = Math.max(0, y - r);
       const yAdd = Math.min(height - 1, y + r + 1);
       const iRem = (yRemove * width + x) * 4;
       const iAdd = (yAdd * width + x) * 4;
-      sr += temp[iAdd] - temp[iRem];
-      sg += temp[iAdd + 1] - temp[iRem + 1];
-      sb += temp[iAdd + 2] - temp[iRem + 2];
+      const addWeight = alphaWeighted ? temp[iAdd + 3] : 1;
+      const removeWeight = alphaWeighted ? temp[iRem + 3] : 1;
+      sr += temp[iAdd] * addWeight - temp[iRem] * removeWeight;
+      sg += temp[iAdd + 1] * addWeight - temp[iRem + 1] * removeWeight;
+      sb += temp[iAdd + 2] * addWeight - temp[iRem + 2] * removeWeight;
       sa += temp[iAdd + 3] - temp[iRem + 3];
     }
   }
@@ -387,7 +397,7 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
   let clarityBlur = null;
   if (clarityVal !== 0) {
     const cRadius = Math.max(3, Math.round(Math.min(width, height) / 140));
-    clarityBlur = boxBlurRGBA(src, width, height, cRadius);
+    clarityBlur = boxBlurRGBA(src, width, height, cRadius, true);
   }
 
   const hslMap = adjustments.hsl;
@@ -406,6 +416,7 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
   const tintShift = adjustments.tint * 0.5;
   const satFactor = 1 + adjustments.saturation / 100;
   const vibAmount = adjustments.vibrance / 100;
+  const monochrome = satFactor === 0 && vibAmount === 0;
   const clarityAmount = clarityVal / 100;
   const fadeAmount = (adjustments.fade || 0) * 0.42;
   const grainAmount = (adjustments.grain || 0) * 0.45;
@@ -467,7 +478,7 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
       }
 
       // 2. Clarity (local midtone contrast)
-      if (clarityBlur) {
+      if (clarityBlur?.[i + 3]) {
         const dr = r - clarityBlur[i];
         const dg = g - clarityBlur[i + 1];
         const db = b - clarityBlur[i + 2];
@@ -591,9 +602,14 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
         b += noise;
       }
 
-      out[i] = clamp(rollOff(r, src[i]));
-      out[i + 1] = clamp(rollOff(g, src[i + 1]));
-      out[i + 2] = clamp(rollOff(b, src[i + 2]));
+      if (monochrome) {
+        const base = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
+        out[i] = out[i + 1] = out[i + 2] = clamp(rollOff(r, base));
+      } else {
+        out[i] = clamp(rollOff(r, src[i]));
+        out[i + 1] = clamp(rollOff(g, src[i + 1]));
+        out[i + 2] = clamp(rollOff(b, src[i + 2]));
+      }
       out[i + 3] = a;
     }
   }
@@ -682,7 +698,13 @@ export function applyLiquifyStroke(imageData, origImageData, x0, y0, x1, y1, rad
 /**
  * Local skin smoothing / blemish healing / restore brush (local ROI snapshot).
  */
-export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, strength, mode) {
+/**
+ * Skin brushes. 'smooth' takes `baseImageData` (the pixels when the brush
+ * session began): its target is computed from that base — edge-aware average
+ * plus part of the base's own pore texture — so scrubbing converges instead of
+ * flattening the skin further with every pass.
+ */
+export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, strength, mode, baseImageData = null) {
   const { width, height, data } = imageData;
   const r = Math.max(4, Math.round(radius));
   const r2 = r * r;
@@ -713,7 +735,8 @@ export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, s
   const snapMaxX = Math.min(width - 1, maxX + pad);
   const snapMinY = Math.max(0, minY - pad);
   const snapMaxY = Math.min(height - 1, maxY + pad);
-  const { roi, rw, rh, ox, oy } = copyROI(data, width, height, snapMinX, snapMinY, snapMaxX, snapMaxY);
+  const smoothFromBase = mode !== 'heal' && baseImageData?.width === width && baseImageData.height === height;
+  const { roi, rw, rh, ox, oy } = copyROI(smoothFromBase ? baseImageData.data : data, width, height, snapMinX, snapMinY, snapMaxX, snapMaxY);
   const healOffsets = mode === 'heal' ? Array.from({ length: 8 }, (_, direction) => {
     const angle = (direction * Math.PI) / 4;
     return [Math.cos(angle) * r * 0.95, Math.sin(angle) * r * 0.95];
@@ -835,6 +858,24 @@ export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, s
             }
           }
         }
+        if (weight > 0) {
+          // Put back part of the fine texture (pixel minus its 3×3 mean).
+          let fr = 0, fg = 0, fbl = 0, fn = 0;
+          for (let dyy = -1; dyy <= 1; dyy++) {
+            const sy = Math.min(rh - 1, Math.max(0, y + dyy - oy));
+            for (let dxx = -1; dxx <= 1; dxx++) {
+              const si = (sy * rw + Math.min(rw - 1, Math.max(0, x + dxx - ox))) * 4;
+              fr += roi[si];
+              fg += roi[si + 1];
+              fbl += roi[si + 2];
+              fn++;
+            }
+          }
+          const keep = SKIN_TEXTURE_KEEP * weight;
+          sr += (cr - fr / fn) * keep;
+          sg += (cg - fg / fn) * keep;
+          sb += (cb - fbl / fn) * keep;
+        }
       }
 
       if (weight > 0) {
@@ -924,13 +965,27 @@ export function computeAutoEnhance(imageData) {
     }
   }
 
-  // Exposure: push median toward ~128 gently
-  const exposure = Math.round(clamp((128 - p50) * 0.35, -30, 35));
-  // Contrast: expand narrow dynamic range
-  const range = Math.max(40, p95 - p05);
-  const contrast = Math.round(clamp(((210 - range) / 210) * 38, -10, 26));
-  const shadows = p05 < 25 ? Math.round(clamp((30 - p05) * 0.9, 0, 28)) : 0;
-  const highlights = p95 > 235 ? Math.round(clamp((230 - p95) * 0.9, -28, 0)) : 0;
+  // Exposure: aim the median at a normal brightness. Keep part of the original
+  // mood (a low-key photo stays a bit darker) and use the pipeline's own
+  // exposure curve (factor = 2^(exposure / 55)) so the result lands where intended.
+  const targetMedian = p50 + (118 - p50) * 0.85;
+  const factor = clamp(targetMedian / Math.max(4, p50), 0.45, 3.2);
+  const exposure = Math.round(clamp(55 * Math.log2(factor), -60, 90));
+  const gain = Math.pow(2, exposure / 55);
+  const lo = p05 * gain;
+  const hi = Math.min(255, p95 * gain);
+
+  // Shadows/highlights recover the ends that exposure pushed too far.
+  const shadows = lo < 22 ? Math.round(clamp((22 - lo) * 1.2, 0, 30)) : 0;
+  const highlights = hi > 238 ? Math.round(clamp((236 - hi) * 1.2, -35, 0)) : 0;
+
+  // Contrast: widen a narrow range, but never so much that the 5th / 95th
+  // percentiles are pushed into pure black or white.
+  const range = Math.max(40, hi - lo);
+  let contrastFactor = Math.pow(1 + clamp(((200 - range) / 200) * 0.3, -0.1, 0.26), 2);
+  if (lo < 128) contrastFactor = Math.min(contrastFactor, (128 - 10) / (128 - lo));
+  if (hi > 128) contrastFactor = Math.min(contrastFactor, (245 - 128) / (hi - 128));
+  const contrast = Math.round(clamp((Math.sqrt(contrastFactor) - 1) * 100, -10, 26));
 
   // Mild gray-world temperature & tint balance
   const avgR = sumR / count;
@@ -990,30 +1045,28 @@ export function computeHistogram(canvas, bins = 48) {
   return { r: norm(r), g: norm(g), b: norm(b), l: norm(l) };
 }
 
-/**
- * Rotate canvas by an arbitrary straighten angle (-45..+45 deg) and crop to the largest inscribed rectangle.
- */
-export function straightenCanvas(src, angleDeg) {
+/** Fit the largest centered, same-aspect rectangle inside a rotated image. */
+export function getStraightenedSize({ width, height }, angleDeg) {
   const rad = (angleDeg * Math.PI) / 180;
   const sin = Math.abs(Math.sin(rad));
   const cos = Math.abs(Math.cos(rad));
-  const w = src.width;
-  const h = src.height;
+  const scale = Math.max(cos + (height / width) * sin, cos + (width / height) * sin);
+  return {
+    width: Math.max(1, Math.floor(width / scale)),
+    height: Math.max(1, Math.floor(height / scale)),
+  };
+}
 
-  // Largest axis-aligned rectangle of the same aspect ratio inside rotated image
-  const wr = w * cos + h * sin;
-  const hr = w * sin + h * cos;
-  const scale = Math.max(wr / w, hr / h);
-  const cropW = Math.max(20, Math.round(w / scale));
-  const cropH = Math.max(20, Math.round(h / scale));
-
+/** Rotate by a small angle and crop inside the original edges. */
+export function straightenCanvas(src, angleDeg) {
+  const { width, height } = getStraightenedSize(src, angleDeg);
   const dst = document.createElement('canvas');
-  dst.width = cropW;
-  dst.height = cropH;
+  dst.width = width;
+  dst.height = height;
   const ctx = dst.getContext('2d');
-  ctx.translate(cropW / 2, cropH / 2);
-  ctx.rotate(rad);
-  ctx.drawImage(src, -w / 2, -h / 2);
+  ctx.translate(width / 2, height / 2);
+  ctx.rotate((angleDeg * Math.PI) / 180);
+  ctx.drawImage(src, -src.width / 2, -src.height / 2);
   return dst;
 }
 
@@ -1062,13 +1115,16 @@ export function bokehBackdrop(workData, cutoutAlpha, blurPx) {
   const { width, height, data } = workData;
   const holes = new ImageData(width, height);
   const hd = holes.data;
+  let hasBackground = false;
   for (let p = 0, i = 0; p < cutoutAlpha.length; p++, i += 4) {
     const keep = 1 - cutoutAlpha[p] / 255;
     hd[i] = data[i];
     hd[i + 1] = data[i + 1];
     hd[i + 2] = data[i + 2];
     hd[i + 3] = Math.round(data[i + 3] * keep * keep * keep);
+    if (hd[i + 3]) hasBackground = true;
   }
+  if (!hasBackground) return null;
   const src = document.createElement('canvas');
   src.width = width;
   src.height = height;
@@ -1087,8 +1143,11 @@ export function bokehBackdrop(workData, cutoutAlpha, blurPx) {
   const out = new ImageData(width, height);
   const od = out.data;
   for (let i = 0; i < od.length; i += 4) {
+    const nearAlpha = near[i + 3];
+    const farAlpha = far[i + 3];
+    if (!data[i + 3] || (!nearAlpha && !farAlpha)) continue;
     // Readback is un-premultiplied: colour = average of background pixels only.
-    const t = Math.min(1, near[i + 3] / 40);
+    const t = farAlpha ? Math.min(1, nearAlpha / 40) : 1;
     for (let c = 0; c < 3; c++) od[i + c] = near[i + c] * t + far[i + c] * (1 - t);
     od[i + 3] = 255;
   }
@@ -1100,18 +1159,50 @@ export function bokehBackdrop(workData, cutoutAlpha, blurPx) {
   return canvas;
 }
 
+/** Average colour of pixels whose mask value passes `test`, within `radius` of (cx, cy). */
+function localMaskColor(data, alpha, width, height, cx, cy, radius, test) {
+  const step = Math.max(1, Math.round(radius / 12));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = Math.max(0, Math.round(cy - radius)); y <= Math.min(height - 1, Math.round(cy + radius)); y += step) {
+    for (let x = Math.max(0, Math.round(cx - radius)); x <= Math.min(width - 1, Math.round(cx + radius)); x += step) {
+      const p = y * width + x;
+      if (!test(alpha[p]) || data[p * 4 + 3] < 255) continue;
+      r += data[p * 4];
+      g += data[p * 4 + 1];
+      b += data[p * 4 + 2];
+      n++;
+    }
+  }
+  return n >= 6 ? [r / n, g / n, b / n] : null;
+}
+
 /**
- * Refine AI cutout alpha mask in-place with a soft circular brush ('keep' -> 255, 'erase' -> 0).
+ * Refine the AI cutout mask with a soft brush. 'erase' fades to transparent.
+ * 'keep' brings pixels back, but when the photo is given it only restores as
+ * much as each pixel differs from the old background around it — plain
+ * background stays transparent, so a stroke never paints a grey patch.
  */
-export function applyAlphaMaskBrushStroke(alphaMask, width, height, cx, cy, radius, strength, mode) {
+export function applyAlphaMaskBrushStroke(alphaMask, width, height, cx, cy, radius, strength, mode, imageData = null) {
   if (!alphaMask) return;
   const r = Math.max(4, Math.round(radius));
   const r2 = r * r;
-  const target = mode === 'keep' ? 255 : 0;
   const minX = Math.max(0, Math.floor(cx - r));
   const maxX = Math.min(width - 1, Math.ceil(cx + r));
   const minY = Math.max(0, Math.floor(cy - r));
   const maxY = Math.min(height - 1, Math.ceil(cy + r));
+
+  let B = null, F = null, fb = null, contrast = 0;
+  const data = imageData?.data;
+  if (mode === 'keep' && data && imageData.width === width) {
+    // Sampled before this dab changes the mask.
+    B = localMaskColor(data, alphaMask, width, height, cx, cy, r * 3, (a) => a <= 8)
+      ?? localMaskColor(data, alphaMask, width, height, cx, cy, r * 10, (a) => a <= 8);
+    F = localMaskColor(data, alphaMask, width, height, cx, cy, r * 4, (a) => a >= 247);
+    if (B && F) {
+      fb = [F[0] - B[0], F[1] - B[1], F[2] - B[2]];
+      contrast = fb[0] * fb[0] + fb[1] * fb[1] + fb[2] * fb[2];
+    }
+  }
 
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
@@ -1121,69 +1212,38 @@ export function applyAlphaMaskBrushStroke(alphaMask, width, height, cx, cy, radi
       if (d2 >= r2) continue;
       const falloff = Math.pow(1 - d2 / r2, 1.3) * Math.min(1, strength);
       const p = y * width + x;
+      let target = mode === 'keep' ? 255 : 0;
+      if (mode === 'keep' && B) {
+        const i = p * 4;
+        const ib = [data[i] - B[0], data[i + 1] - B[1], data[i + 2] - B[2]];
+        let a;
+        if (contrast >= 40 * 40) {
+          // Position between background and subject colour = how opaque it really is.
+          a = (ib[0] * fb[0] + ib[1] * fb[1] + ib[2] * fb[2]) / contrast;
+          a = a * 1.15 + 0.03;
+        } else {
+          a = (Math.max(Math.abs(ib[0]), Math.abs(ib[1]), Math.abs(ib[2])) - 8) / 30;
+        }
+        target = Math.max(alphaMask[p], Math.round(Math.min(1, Math.max(0, a)) * 255));
+      }
       alphaMask[p] = clamp(Math.round(alphaMask[p] + (target - alphaMask[p]) * falloff));
     }
   }
 }
 
-/**
- * Tile the edited portrait onto a 1800x1200 px (4x6 inch @ 300 DPI) printable ID photo sheet.
- */
-export function generateIdPhotoSheetCanvas(sourceCanvas, cols = 4, rows = 2) {
-  const sheetW = 1800;
-  const sheetH = 1200;
-  const margin = 60;
-  const gap = 26;
-  const cellW = Math.floor((sheetW - margin * 2 - gap * (cols - 1)) / cols);
-  const cellH = Math.floor((sheetH - margin * 2 - gap * (rows - 1)) / rows);
-
-  const out = document.createElement('canvas');
-  out.width = sheetW;
-  out.height = sheetH;
-  const ctx = out.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, sheetW, sheetH);
-
-  const srcRatio = sourceCanvas.width / sourceCanvas.height;
-  const cellRatio = cellW / cellH;
-
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const dx = margin + c * (cellW + gap);
-      const dy = margin + r * (cellH + gap);
-
-      // Center-crop source to fill cell cleanly
-      let sx = 0, sy = 0, sw = sourceCanvas.width, sh = sourceCanvas.height;
-      if (srcRatio > cellRatio) {
-        sw = Math.round(sourceCanvas.height * cellRatio);
-        sx = Math.round((sourceCanvas.width - sw) / 2);
-      } else {
-        sh = Math.round(sourceCanvas.width / cellRatio);
-        sy = Math.round((sourceCanvas.height - sh) / 2);
-      }
-
-      ctx.drawImage(sourceCanvas, sx, sy, sw, sh, dx, dy, cellW, cellH);
-
-      // Thin light-gray cut guide border
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(dx, dy, cellW, cellH);
-    }
-  }
-  return out;
-}
 
 /**
  * Draw optional border frame, logo watermark, and text overlay onto target canvas.
  */
 export function renderTextAndFrame(ctx, w, h, textConfig, frameConfig, logoConfig) {
+  let textAnchor = null;
   if (frameConfig?.enabled && frameConfig.width > 0) {
     const fw = Math.min(Math.min(w, h) * 0.15, frameConfig.width * (Math.max(w, h) / 1000));
     const style = frameConfig.style || 'classic';
     ctx.save();
     if (style === 'polaroid') {
-      const side = fw;
-      const bottom = fw * 3.4;
+      const side = Math.min(fw, h / (3.4 * 3));
+      const bottom = side * 3.4;
       ctx.fillStyle = frameConfig.color || '#ffffff';
       ctx.fillRect(0, 0, w, side);
       ctx.fillRect(0, 0, side, h);
@@ -1207,15 +1267,14 @@ export function renderTextAndFrame(ctx, w, h, textConfig, frameConfig, logoConfi
     ctx.restore();
   }
 
-  if (logoConfig?.enabled && logoConfig.img) {
+  if (logoConfig?.enabled && logoConfig.img?.width > 0 && logoConfig.img.height > 0) {
     const img = logoConfig.img;
     const targetW = (Math.min(w, h) * (logoConfig.scale ?? 18)) / 100;
     const targetH = targetW * (img.height / img.width);
-    const lx = (w * (logoConfig.x ?? 84)) / 100 - targetW / 2;
-    const ly = (h * (logoConfig.y ?? 84)) / 100 - targetH / 2;
+    const placement = fitOverlay(w, h, targetW, targetH, logoConfig.x ?? 84, logoConfig.y ?? 84);
     ctx.save();
     ctx.globalAlpha = Math.max(0.05, Math.min(1, (logoConfig.opacity ?? 90) / 100));
-    ctx.drawImage(img, lx, ly, targetW, targetH);
+    ctx.drawImage(img, placement.x, placement.y, placement.width, placement.height);
     ctx.restore();
   }
 
@@ -1254,10 +1313,19 @@ export function renderTextAndFrame(ctx, w, h, textConfig, frameConfig, logoConfi
         }
       }
     } else {
-      const tx = (w * (textConfig.x ?? 50)) / 100;
-      const ty = (h * (textConfig.y ?? 90)) / 100;
+      const metrics = ctx.measureText(textConfig.content);
+      const textWidth = Math.max(metrics.width, metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight || 0);
+      const textHeight = Math.max(scaledSize * 1.2, (metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent) || 0);
+      const fit = fitOverlay(w, h, textWidth, textHeight, textConfig.x ?? 50, textConfig.y ?? 90);
+      const fitSize = scaledSize * fit.scale;
+      ctx.font = `${italic}${weight} ${fitSize}px ${family}`;
+      ctx.lineWidth = Math.min(Math.min(w, h) * 0.03, Math.max(2, fitSize * 0.08));
+      const tx = fit.x + fit.width / 2;
+      const ty = fit.y + fit.height / 2;
       drawOne(tx, ty);
+      textAnchor = { x: 100 * tx / w, y: 100 * ty / h };
     }
     ctx.restore();
   }
+  return textAnchor;
 }

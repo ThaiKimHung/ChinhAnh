@@ -9,6 +9,7 @@ import samplePortraitUrl from './assets/studio-portrait-sample.jpg';
 import { createImageJobGuard } from './engine/imageJobs';
 import { advanceBrushStroke, createBrushStroke, finishBrushStroke } from './engine/brushStroke';
 import { inpaintInWorker } from './engine/inpaintJob';
+import { applyStyleToSession, HISTORY_MAX_ENTRIES } from './engine/history';
 import {
   createZip,
   downloadBlob,
@@ -31,10 +32,10 @@ import {
   applyAlphaMaskBrushStroke,
   computeAutoEnhance,
   computeHistogram,
-  generateIdPhotoSheetCanvas,
 } from './engine/imagePipeline';
 import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
 import { pastePatch } from './engine/patch';
+import { generateIdSheet, withPrintDpi } from './engine/idPhoto';
 import { createLiquifySession, liquifyDab } from './engine/liquify';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
@@ -61,6 +62,11 @@ import {
 } from './hooks/useDraftPersistence';
 
 const NO_OFFSET = { dx: 0, dy: 0 };
+
+function queuedStyles(value) {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
+}
 
 export default function App() {
   const fileInputRef = useRef(null);
@@ -106,6 +112,7 @@ export default function App() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [splitView, setSplitView] = useState(false);
   const [isComparingOriginal, setIsComparingOriginal] = useState(false);
+  const [inspectionBackground, setInspectionBackground] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const viewportRef = useRef(null);
@@ -127,6 +134,9 @@ export default function App() {
   // Liquify keeps a displacement field over the pixels as they were when the
   // session began; any other pixel edit (or undo) starts a new session.
   const liquifySessionRef = useRef(null);
+  // Same idea for the smoothing brush: it smooths toward the pixels as they
+  // were when the session began, so scrubbing does not flatten skin endlessly.
+  const smoothSessionRef = useRef(null);
   const pixelEditVersionRef = useRef(0);
   const brushEditedRef = useRef(false);
 
@@ -274,6 +284,14 @@ export default function App() {
     setZoom(value);
   }, []);
 
+  const inspecting = inspectionBackground !== null;
+  const handleZoomFit = () => imageSize && fitZoomToScreen(imageSize.width, imageSize.height);
+  const handleInspectionZoom = (level) => {
+    const ratio = level / zoom;
+    setPan(({ x, y }) => ({ x: x * ratio, y: y * ratio }));
+    changeZoom(level);
+  };
+
   const captureCurrentSession = useCallback(() => {
     if (!workDataRef.current) return null;
     const p = latestParamsRef.current;
@@ -309,8 +327,14 @@ export default function App() {
 
   const restoreSession = useCallback(
     (imgId) => {
-      const s = sessionsRef.current[imgId];
-      if (!s) return false;
+      const saved = sessionsRef.current[imgId];
+      if (!saved) return false;
+      const pending = queuedStyles(pendingStyleByIdRef.current[imgId]);
+      const s = pending.reduce(applyStyleToSession, saved);
+      if (pending.length) {
+        delete pendingStyleByIdRef.current[imgId];
+        sessionsRef.current[imgId] = s;
+      }
 
       origDataRef.current = s.origData;
       workDataRef.current = cloneImageData(s.workData);
@@ -332,17 +356,9 @@ export default function App() {
 
       history.reset(s.history, s.historyIdx);
 
-      const pending = pendingStyleByIdRef.current[imgId];
-      if (pending) {
-        delete pendingStyleByIdRef.current[imgId];
-        setAdjustments({ ...pending.adjustments });
-        setActivePreset(pending.activePreset);
-        setBeauty({ ...pending.beauty });
-      } else {
-        setAdjustments(s.adjustments);
-        setActivePreset(s.activePreset);
-        setBeauty(s.beauty);
-      }
+      setAdjustments(s.adjustments);
+      setActivePreset(s.activePreset);
+      setBeauty(s.beauty);
 
       setBgState(s.bgState);
       setTextConfig(s.textConfig);
@@ -389,39 +405,40 @@ export default function App() {
         setCloneSource(null);
         setPickingCloneSource(false);
 
-        const pending = targetId ? pendingStyleByIdRef.current[targetId] : null;
-        if (pending && targetId) delete pendingStyleByIdRef.current[targetId];
+        const pending = queuedStyles(pendingStyleByIdRef.current[targetId]);
+        delete pendingStyleByIdRef.current[targetId];
 
-        const initAdj = pending ? { ...pending.adjustments } : { ...DEFAULT_ADJUSTMENTS };
-        const initPreset = pending ? pending.activePreset : 'original';
-        const initBeauty = pending ? { ...pending.beauty } : { ...DEFAULT_BEAUTY };
         const initBg = { ...DEFAULT_BG_STATE };
         const initText = { ...DEFAULT_TEXT };
         const initFrame = { ...DEFAULT_FRAME };
         const initLogo = { ...DEFAULT_LOGO };
 
-        history.reset([
-          {
-            workData: cloneImageData(imgData),
-            origData: imgData,
-            origCanvas: c,
-            cutoutAlpha: null,
-            adjustments: initAdj,
-            activePreset: initPreset,
-            beauty: initBeauty,
-            bgState: initBg,
-            textConfig: initText,
-            frameConfig: initFrame,
-            logoConfig: initLogo,
-            geometry: [],
-          },
-        ]);
+        const original = {
+          workData: cloneImageData(imgData),
+          origData: imgData,
+          origCanvas: c,
+          cutoutAlpha: null,
+          adjustments: { ...DEFAULT_ADJUSTMENTS },
+          activePreset: 'original',
+          beauty: { ...DEFAULT_BEAUTY },
+          bgState: initBg,
+          textConfig: initText,
+          frameConfig: initFrame,
+          logoConfig: initLogo,
+          geometry: [],
+        };
+        const styled = pending.reduce(applyStyleToSession, {
+          ...original,
+          history: [original],
+          historyIdx: 0,
+        });
+        history.reset(styled.history, styled.historyIdx);
 
         setImageSize({ width: w, height: h });
         setSourceSize(originalSize);
-        setAdjustments(initAdj);
-        setActivePreset(initPreset);
-        setBeauty(initBeauty);
+        setAdjustments(styled.adjustments);
+        setActivePreset(styled.activePreset);
+        setBeauty(styled.beauty);
         setBgState(initBg);
         setTextConfig(initText);
         setFrameConfig(initFrame);
@@ -703,10 +720,11 @@ export default function App() {
   }, [cancelEraseJob, cancelPatch, imageJobs, patchFeather, patchFlip, patchOffset, patchRect, patchToneMatch, pushSnapshot]);
 
   useEffect(() => {
-    if (!patchActive || !patchRect) return;
+    if (inspecting || !patchActive || !patchRect) return;
     const onKey = (e) => {
       if (e.target instanceof Element && e.target.closest('input, textarea, select, dialog[open]')) return;
       if (e.key === 'Enter') {
+        if (e.target instanceof Element && e.target.closest('button')) return;
         e.preventDefault();
         handleApplyPatch();
       } else if (e.key === 'Escape') {
@@ -715,7 +733,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [cancelPatch, handleApplyPatch, patchActive, patchRect]);
+  }, [cancelPatch, handleApplyPatch, inspecting, patchActive, patchRect]);
 
   const paintEraseMaskSegment = useCallback(
     (x0, y0, x1, y1) => {
@@ -812,21 +830,40 @@ export default function App() {
     if (!workData) return false;
     const strength = brushStrength / 100;
     if (activeTab === 'portrait' && brushTool !== 'none') {
-      applySkinBrushStroke(workData, origDataRef.current, x, y, brushSize, strength, brushTool);
+      let base = null;
+      if (brushTool === 'smooth') {
+        let session = smoothSessionRef.current;
+        if (!session || session.work !== workData || session.version !== pixelEditVersionRef.current) {
+          session = { work: workData, version: pixelEditVersionRef.current, base: cloneImageData(workData) };
+          smoothSessionRef.current = session;
+        }
+        base = session.base;
+      }
+      applySkinBrushStroke(workData, origDataRef.current, x, y, brushSize, strength, brushTool, base);
     } else if (activeTab === 'liquify') {
       if (liquifyMode === 'push' && fromX === x && fromY === y) return false;
+      const matte = cutoutAlphaRef.current;
       let session = liquifySessionRef.current;
-      if (!session || session.work !== workData || session.version !== pixelEditVersionRef.current) {
-        session = { work: workData, version: pixelEditVersionRef.current, field: createLiquifySession(workData) };
+      if (
+        !session || session.work !== workData || session.matte !== matte ||
+        session.version !== pixelEditVersionRef.current
+      ) {
+        session = {
+          work: workData,
+          matte,
+          version: pixelEditVersionRef.current,
+          field: createLiquifySession(workData, matte),
+        };
         liquifySessionRef.current = session;
       }
-      liquifyDab(session.field, workData, fromX, fromY, x, y, brushSize, strength, liquifyMode);
+      liquifyDab(session.field, workData, fromX, fromY, x, y, brushSize, strength, liquifyMode, matte);
     } else if (activeTab === 'erase' && eraseMode === 'clone' && cloneOffsetRef.current) {
       const { dx, dy } = cloneOffsetRef.current;
       applyCloneStampStroke(workData, x, y, dx, dy, brushSize, strength, cloneToneMatch);
     } else if (activeTab === 'background' && bgMaskBrush !== 'none' && cutoutAlphaRef.current) {
       const { width, height } = workData;
-      applyAlphaMaskBrushStroke(cutoutAlphaRef.current, width, height, x, y, brushSize, strength, bgMaskBrush);
+      applyAlphaMaskBrushStroke(cutoutAlphaRef.current, width, height, x, y, brushSize, strength, bgMaskBrush, workData);
+      liquifySessionRef.current = null;
     } else {
       return false;
     }
@@ -879,9 +916,12 @@ export default function App() {
       pushSnapshot(true);
       // The liquify session stays valid across its own strokes.
       if (liquifySessionRef.current && activeTab === 'liquify') liquifySessionRef.current.version = pixelEditVersionRef.current;
+      if (smoothSessionRef.current && activeTab === 'portrait' && brushTool === 'smooth') {
+        smoothSessionRef.current.version = pixelEditVersionRef.current;
+      }
     }
     brushEditedRef.current = false;
-  }, [activeTab, applyBrushDab, liquifyMode, pushSnapshot, updateBrushPreview]);
+  }, [activeTab, applyBrushDab, brushTool, liquifyMode, pushSnapshot, updateBrushPreview]);
 
   // AI Background Removal via @imgly/background-removal (runs on current workData so liquify/erase stay aligned)
   const handleRunAiBgRemoval = async () => {
@@ -1105,15 +1145,12 @@ export default function App() {
     setCopiedStyle(style);
     images.forEach((img) => {
       if (img.id === activeImageId) return;
-      if (sessionsRef.current[img.id]) {
-        sessionsRef.current[img.id] = {
-          ...sessionsRef.current[img.id],
-          adjustments: { ...style.adjustments },
-          activePreset: style.activePreset,
-          beauty: { ...style.beauty },
-        };
+      const session = sessionsRef.current[img.id];
+      if (session) {
+        sessionsRef.current[img.id] = applyStyleToSession(session, style);
       } else {
-        pendingStyleByIdRef.current[img.id] = style;
+        const pending = queuedStyles(pendingStyleByIdRef.current[img.id]);
+        pendingStyleByIdRef.current[img.id] = [...pending, style].slice(1 - HISTORY_MAX_ENTRIES);
       }
     });
   };
@@ -1130,14 +1167,15 @@ export default function App() {
       ? await renderForExport(activeItem, captureCurrentSession(), resolution, null, workMaxDim)
       : displayCanvas;
     if (!idSheetGrid) return source;
-    const [cols, rows] = idSheetGrid.split('x').map(Number);
-    return generateIdPhotoSheetCanvas(source, cols, rows);
+    return generateIdSheet(source, idSheetGrid);
   }
 
   const handleExport = async ({ format, quality, scale, fileName, idSheetGrid, resolution }) => {
     const canvas = await activeExportCanvas(resolution, idSheetGrid);
-    const blob = await encodeCanvas(canvas, format, quality, idSheetGrid ? 1 : scale);
-    const suffix = idSheetGrid ? '-IDSheet-' + idSheetGrid : '';
+    const encoded = await encodeCanvas(canvas, format, quality, idSheetGrid ? 1 : scale);
+    // Print sheets carry 300 dpi so they print at their real size.
+    const blob = idSheetGrid ? await withPrintDpi(encoded) : encoded;
+    const suffix = idSheetGrid ? '-AnhThe-' + idSheetGrid + 'cm' : '';
     const name = fileName?.trim().replace(/\.(?:jpe?g|png|webp)$/i, '');
     downloadBlob(blob, sanitizeExportName(name, defaultFileName) + suffix + '.' + extensionForFormat(format));
   };
@@ -1147,7 +1185,7 @@ export default function App() {
     const selected = images.map((item) => ({
       item,
       session: sessionsRef.current[item.id],
-      style: pendingStyleByIdRef.current[item.id],
+      style: queuedStyles(pendingStyleByIdRef.current[item.id]).at(-1),
     }));
     const entries = [];
     const failed = [];
@@ -1176,7 +1214,8 @@ export default function App() {
   const handleCopyToClipboard = async (scale = 1, idSheetGrid = null, resolution = 'working') => {
     if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return false;
     const imageBlob = activeExportCanvas(resolution, idSheetGrid)
-      .then((canvas) => encodeCanvas(canvas, 'image/png', 1, idSheetGrid ? 1 : scale));
+      .then((canvas) => encodeCanvas(canvas, 'image/png', 1, idSheetGrid ? 1 : scale))
+      .then((blob) => idSheetGrid ? withPrintDpi(blob) : blob);
     try {
       await Promise.all([
         imageBlob,
@@ -1273,10 +1312,12 @@ export default function App() {
         onToggleSplit={() => setSplitView((v) => !v)}
         onCompareStart={() => setIsComparingOriginal(true)}
         onCompareEnd={() => setIsComparingOriginal(false)}
+        inspecting={inspecting}
+        onToggleInspection={() => setInspectionBackground((current) => current ? null : 'checkerboard')}
         zoom={zoom}
         onZoomIn={() => changeZoom((z) => Math.min(4, z * 1.25))}
         onZoomOut={() => changeZoom((z) => Math.max(Math.min(0.02, z), z / 1.25))}
-        onZoomFit={() => imageSize && fitZoomToScreen(imageSize.width, imageSize.height)}
+        onZoomFit={handleZoomFit}
         onResetAll={handleResetAll}
         onOpenExport={() => setExportOpen(true)}
         showFilmstrip={showFilmstrip}
@@ -1294,6 +1335,7 @@ export default function App() {
         <LeftNav
           activeTab={activeTab}
           onSelectTab={(tab) => {
+            setInspectionBackground(null);
             setActiveTab(tab);
             setMobilePanelOpen(true);
             if (tab !== 'crop') {
@@ -1319,24 +1361,28 @@ export default function App() {
             setPan={setPan}
             splitView={splitView}
             isComparingOriginal={isComparingOriginal}
-            isBrushActive={isBrushActive}
+            inspectionBackground={inspectionBackground}
+            onInspectionBackground={setInspectionBackground}
+            onInspectionZoom={handleInspectionZoom}
+            onZoomFit={handleZoomFit}
+            isBrushActive={!inspecting && isBrushActive}
             brushSize={brushSize}
             onStrokeStart={handleStrokeStart}
             onStrokeMove={handleStrokeMove}
             onStrokeEnd={handleStrokeEnd}
-            eraseMaskCanvas={activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvasState : null}
-            patchActive={patchActive}
-            patchRect={patchRect}
+            eraseMaskCanvas={!inspecting && activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvasState : null}
+            patchActive={!inspecting && patchActive}
+            patchRect={inspecting ? null : patchRect}
             patchOffset={patchOffset}
             patchFlip={patchFlip}
             onPatchChange={(rect, offset) =>
               setPatchSelection(rect ? { key: patchKey, rect, offset, flip: livePatch?.flip ?? false } : null)
             }
             eraseMaskVersion={eraseMaskVersion}
-            cloneSource={activeTab === 'erase' && eraseMode === 'clone' ? cloneSource : null}
-            pickingCloneSource={activeTab === 'erase' && eraseMode === 'clone' && pickingCloneSource}
+            cloneSource={!inspecting && activeTab === 'erase' && eraseMode === 'clone' ? cloneSource : null}
+            pickingCloneSource={!inspecting && activeTab === 'erase' && eraseMode === 'clone' && pickingCloneSource}
             onPickCloneSource={
-              activeTab === 'erase' && eraseMode === 'clone'
+              !inspecting && activeTab === 'erase' && eraseMode === 'clone'
                 ? (x, y) => {
                     markDraftDirty();
                     setCloneSource({ x, y });
@@ -1344,12 +1390,12 @@ export default function App() {
                   }
                 : null
             }
-            cropActive={cropActive && activeTab === 'crop'}
+            cropActive={!inspecting && cropActive && activeTab === 'crop'}
             cropRect={cropRect}
             setCropRect={setCropRect}
             cropAspect={cropAspect}
-            straightenAngle={activeTab === 'crop' ? straightenAngle : 0}
-            canDragText={activeTab === 'text' && textConfig.enabled && !textConfig.repeatWatermark}
+            straightenAngle={!inspecting && activeTab === 'crop' ? straightenAngle : 0}
+            canDragText={!inspecting && activeTab === 'text' && textConfig.enabled && !textConfig.repeatWatermark}
             textPos={{ x: textConfig.x, y: textConfig.y }}
             onDragText={(x, y) => {
               markDraftDirty();
@@ -1393,7 +1439,7 @@ export default function App() {
 
         <RightPanel
           activeTab={activeTab}
-          mobilePanelOpen={mobilePanelOpen}
+          mobilePanelOpen={!inspecting && mobilePanelOpen}
           onCloseMobilePanel={() => setMobilePanelOpen(false)}
           hasImage={!!displayCanvas}
           histogram={histogram}
@@ -1438,6 +1484,13 @@ export default function App() {
             cancelEraseJob();
             imageJobs.invalidate();
             workDataRef.current = cloneImageData(origDataRef.current);
+            cutoutAlphaRef.current = null;
+            liquifySessionRef.current = null;
+            brushStrokeRef.current = null;
+            brushEditedRef.current = false;
+            setHasCutoutMask(false);
+            setBgMaskBrush('none');
+            setEditorNotice('');
             pushSnapshot(true);
             setRenderTick((t) => t + 1);
           }}

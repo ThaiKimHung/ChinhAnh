@@ -200,12 +200,35 @@ export function applyCutoutMatte(
   const radius = Math.min(64, Math.round(feather * scale));
   const blurred = radius > 0 ? featherAlphaMask(rawAlpha, width, height, radius) : rawAlpha;
   const softness = Math.min(0.48, Math.max(0, feather / 16));
+  // Outward softening is coloured with the nearby subject, never the old background.
+  const outwardAmount = Math.min(1, feather / 6);
+  const subjectColour = radius > 0 && outwardAmount > 0
+    ? localColorField(data, rawAlpha, width, height, radius + 2, (a) => a >= 200)
+    : null;
   for (let p = 0; p < rawAlpha.length; p++) {
-    // Soften toward the subject, without bringing back old background pixels
-    // or turning very fine strands into a translucent blur.
-    const opacity = (rawAlpha[p] - Math.max(0, rawAlpha[p] - blurred[p]) * softness) * (opacityScale ? opacityScale[p] : 1);
-    const i = p * 4 + 3;
-    data[i] = Math.round((data[i] * opacity) / 255);
+    const raw = rawAlpha[p];
+    // Inside: soften toward the subject without turning fine strands into a blur.
+    const inward = raw - Math.max(0, raw - blurred[p]) * softness;
+    // Outside a broad edge (thin strands never reach the 35% threshold).
+    let outward = 0;
+    if (subjectColour && blurred[p] > raw) {
+      const t = (blurred[p] / 255 - 0.35) / 0.65;
+      if (t > 0) outward = t * 255 * outwardAmount;
+    }
+    const i = p * 4;
+    let opacity = Math.max(inward, outward);
+    if (outward > inward) {
+      const c = subjectColour[i + 3];
+      if (c >= 1) {
+        data[i] = subjectColour[i] / c;
+        data[i + 1] = subjectColour[i + 1] / c;
+        data[i + 2] = subjectColour[i + 2] / c;
+      } else {
+        opacity = inward;
+      }
+    }
+    opacity *= opacityScale ? opacityScale[p] : 1;
+    data[i + 3] = Math.round((data[i + 3] * opacity) / 255);
   }
   return imageData;
 }

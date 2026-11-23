@@ -1,12 +1,16 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { X, Download, Check, Copy, Grid, Images, FileImage } from 'lucide-react';
-import { generateIdPhotoSheetCanvas } from '../engine/imagePipeline';
-import { downloadBlob, encodeCanvas, isSupportedCanvasSize } from '../engine/exportImage';
+import { ID_DPI, ID_SHEETS, generateIdSheet, idSheetLayout } from '../engine/idPhoto';
+import { canRenderOriginalExport, downloadBlob, encodeCanvas } from '../engine/exportImage';
 
 const FORMAT_OPTIONS = [
   { value: 'image/jpeg', label: 'JPG', description: 'Nền trắng, phổ biến' },
   { value: 'image/png', label: 'PNG', description: 'Giữ nền trong suốt' },
   { value: 'image/webp', label: 'WebP', description: 'Nhẹ, giữ nền trong suốt' },
+];
+const SHEET_FORMAT_OPTIONS = [
+  { value: 'image/jpeg', label: 'JPG', description: `Phổ biến, ${ID_DPI} DPI` },
+  { value: 'image/png', label: 'PNG', description: `Giữ chi tiết, ${ID_DPI} DPI` },
 ];
 const SCALE_OPTIONS = [2, 1, 0.75, 0.5];
 const MODE_OPTIONS = [
@@ -14,7 +18,6 @@ const MODE_OPTIONS = [
   { value: 'id-sheet', label: 'Tờ ảnh thẻ', icon: Grid },
   { value: 'batch', label: 'Tất cả', icon: Images },
 ];
-const PRINT_SIZE = { width: 1800, height: 1200 };
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -26,13 +29,14 @@ function formatDimensions(size, scale = 1) {
   return size ? `${Math.max(1, Math.round(size.width * scale))} × ${Math.max(1, Math.round(size.height * scale))} px` : '—';
 }
 
-function ExportOption({ selected, onSelect, children, className = '' }) {
+function ExportOption({ selected, onSelect, disabled = false, children, className = '' }) {
   return (
     <button
       type="button"
       onClick={onSelect}
+      disabled={disabled}
       aria-pressed={selected}
-      className={`min-h-10 rounded-lg border px-2 py-2 text-xs font-medium outline-offset-2 focus-visible:outline-2 focus-visible:outline-amber-400 enabled:cursor-pointer ${
+      className={`min-h-10 rounded-lg border px-2 py-2 text-xs font-medium outline-offset-2 focus-visible:outline-2 focus-visible:outline-amber-400 enabled:cursor-pointer disabled:opacity-45 ${
         selected ? 'border-amber-500 bg-amber-500/15 text-amber-300' : 'border-[#2c3344] bg-[#111319] text-slate-300 enabled:hover:border-slate-500'
       } ${className}`}
     >
@@ -59,8 +63,9 @@ export default function ExportModal({
   const fileNameId = useId();
   const qualityId = useId();
   const [mode, setMode] = useState('single');
-  const [sheetGrid, setSheetGrid] = useState('4x2');
-  const [format, setFormat] = useState('image/jpeg');
+  const [sheetGrid, setSheetGrid] = useState('3x4');
+  const [photoFormat, setPhotoFormat] = useState('image/jpeg');
+  const [sheetFormat, setSheetFormat] = useState('image/jpeg');
   const [quality, setQuality] = useState(92);
   const [scale, setScale] = useState(1);
   const [resolutionChoice, setResolutionChoice] = useState('auto');
@@ -75,11 +80,14 @@ export default function ExportModal({
   const exportMode = mode === 'batch' && (imageCount < 2 || !onExportBatch) ? 'single' : mode;
   const isBatch = exportMode === 'batch';
   const isSheet = exportMode === 'id-sheet';
-  // Default to full resolution whenever the browser can handle the original size.
-  const autoResolution = fullResolutionSize && isSupportedCanvasSize(fullResolutionSize) ? 'original' : 'working';
-  const resolution = !fullResolutionSize ? 'working' : resolutionChoice === 'auto' ? autoResolution : resolutionChoice;
+  const format = isSheet ? sheetFormat : photoFormat;
+  const canExportOriginal = canRenderOriginalExport(originalSize, fullResolutionSize);
+  const resolution = canExportOriginal && resolutionChoice !== 'working' ? 'original' : 'working';
   const baseSize = resolution === 'original' ? fullResolutionSize : imageSize;
-  const outputDimensions = isSheet ? formatDimensions(PRINT_SIZE) : formatDimensions(baseSize, scale);
+  const sheetLayout = isSheet ? idSheetLayout(sheetGrid) : null;
+  const outputDimensions = sheetLayout
+    ? formatDimensions({ width: sheetLayout.sheetW, height: sheetLayout.sheetH })
+    : formatDimensions(baseSize, scale);
   const estimateKey = [exportMode, sheetGrid, format, quality, scale, outputDimensions].join('/');
   const displayedEstimate = resolution === 'working' && estimate?.key === estimateKey && estimate.canvas === displayCanvas
     ? estimate.size : '';
@@ -106,8 +114,7 @@ export default function ExportModal({
       let sheet;
       try {
         if (isSheet) {
-          const [cols, rows] = sheetGrid.split('x').map(Number);
-          sheet = generateIdPhotoSheetCanvas(displayCanvas, cols, rows);
+          sheet = generateIdSheet(displayCanvas, sheetGrid);
         }
         const blob = await encodeCanvas(sheet || displayCanvas, format, quality / 100, isSheet ? 1 : scale);
         if (!cancelled) setEstimate({ key: estimateKey, canvas: displayCanvas, size: formatBytes(blob.size) });
@@ -246,10 +253,11 @@ export default function ExportModal({
 
             {isSheet && (
               <div>
-                <p className="mb-1.5 text-xs font-medium text-slate-300">Bố cục tờ in 10 × 15 cm</p>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">Bố cục tờ in 4 × 6 inch (khoảng 10 × 15 cm)</p>
                 <div role="group" aria-label="Bố cục tờ in" className="grid grid-cols-2 gap-2">
-                  <ExportOption selected={sheetGrid === '4x2'} onSelect={() => setSheetGrid('4x2')}>8 ảnh (4 × 2)</ExportOption>
-                  <ExportOption selected={sheetGrid === '2x2'} onSelect={() => setSheetGrid('2x2')}>4 ảnh (2 × 2)</ExportOption>
+                  {Object.entries(ID_SHEETS).map(([id, spec]) => (
+                    <ExportOption key={id} selected={sheetGrid === id} onSelect={() => setSheetGrid(id)}>{spec.label}</ExportOption>
+                  ))}
                 </div>
               </div>
             )}
@@ -275,12 +283,15 @@ export default function ExportModal({
                     <span className="block">Bản đang chỉnh</span>
                     <span className="mt-0.5 block text-slate-400">{isBatch ? 'Theo từng ảnh' : formatDimensions(imageSize)}</span>
                   </ExportOption>
-                  <ExportOption selected={resolution === 'original'} onSelect={() => setResolutionChoice('original')} className="text-left">
+                  <ExportOption selected={resolution === 'original'} onSelect={() => setResolutionChoice('original')} disabled={!canExportOriginal} className="text-left">
                     <span className="block">Từ ảnh gốc</span>
                     <span className="mt-0.5 block text-slate-400">{isBatch ? 'Theo từng ảnh' : formatDimensions(fullResolutionSize)}</span>
                   </ExportOption>
                 </div>
                 {!isBatch && originalSize && <p className="mt-1.5 text-xs text-slate-400">Ảnh gốc trước khi cắt, xoay {formatDimensions(originalSize)}</p>}
+                {!canExportOriginal && (
+                  <p className="mt-1 text-xs text-slate-400">Ảnh gốc vượt giới hạn bộ nhớ. Bạn có thể xuất bản đang chỉnh.</p>
+                )}
                 {resolution === 'original' && (
                   <p className="mt-1 text-xs text-slate-400">Các nét cọ và mặt nạ được nội suy từ bản đang chỉnh.</p>
                 )}
@@ -289,9 +300,9 @@ export default function ExportModal({
 
             <div>
               <p className="mb-1.5 text-xs font-medium text-slate-300">Định dạng</p>
-              <div role="group" aria-label="Định dạng ảnh" className="grid grid-cols-3 gap-2">
-                {FORMAT_OPTIONS.map(({ value, label, description }) => (
-                  <ExportOption key={value} selected={format === value} onSelect={() => setFormat(value)} className="text-left">
+              <div role="group" aria-label="Định dạng ảnh" className={`grid gap-2 ${isSheet ? 'grid-cols-2' : 'grid-cols-3'}`}>
+                {(isSheet ? SHEET_FORMAT_OPTIONS : FORMAT_OPTIONS).map(({ value, label, description }) => (
+                  <ExportOption key={value} selected={format === value} onSelect={() => (isSheet ? setSheetFormat : setPhotoFormat)(value)} className="text-left">
                     <span className="block font-bold">{label}</span>
                     <span className="mt-0.5 block text-[11px] leading-snug text-slate-400">{description}</span>
                   </ExportOption>

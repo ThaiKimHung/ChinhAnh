@@ -6,6 +6,7 @@ import {
   Redo2,
   SplitSquareHorizontal,
   Eye,
+  ScanEye,
   ZoomIn,
   ZoomOut,
   Download,
@@ -55,6 +56,8 @@ export default function TopBar({
   onToggleSplit,
   onCompareStart,
   onCompareEnd,
+  inspecting,
+  onToggleInspection,
   zoom,
   onZoomIn,
   onZoomOut,
@@ -182,6 +185,19 @@ export default function TopBar({
               >
                 <Eye className="w-3.5 h-3.5" />
                 <span className="hidden lg:inline">Giữ xem gốc</span>
+              </button>
+              <button
+                type="button"
+                onClick={onToggleInspection}
+                aria-label="Soi ảnh"
+                aria-pressed={inspecting}
+                title="Soi viền và vùng đã chỉnh"
+                className={`flex size-10 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition cursor-pointer md:size-auto ${
+                  inspecting ? 'bg-amber-500 text-[#0f1116]' : 'text-slate-300 hover:bg-[#262c3b]'
+                }`}
+              >
+                <ScanEye className="size-3.5" />
+                <span className="hidden xl:inline">Soi ảnh</span>
               </button>
             </div>
 

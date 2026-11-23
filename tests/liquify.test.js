@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { applyCutoutMatte } from '../src/engine/cutout.js';
 import { createLiquifySession, liquifyDab } from '../src/engine/liquify.js';
 
 // Photo-like texture: random values softened by a 3×3 average.
@@ -67,6 +68,55 @@ test('a push moves content in the stroke direction', () => {
   liquifyDab(session, img, 40, 20, 50, 20, 20, 1, 'push');
   // Dark content was pushed right past the original edge.
   assert.ok(img.data[(20 * w + 43) * 4] < 128);
+});
+
+test('a push after cutting out a subject moves its edge without showing the old background', () => {
+  const width = 96, height = 64;
+  for (const fromX of [36, 60]) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    const matte = new Uint8ClampedArray(width * height);
+    for (let p = 0; p < matte.length; p++) {
+      const subject = p % width < 48;
+      data.set(subject ? [230, 35, 35, 255] : [25, 190, 210, 255], p * 4);
+      matte[p] = subject ? 255 : 0;
+    }
+    const img = { width, height, data };
+    const session = createLiquifySession(img, matte);
+    liquifyDab(session, img, fromX, 32, 48, 32, 14, 1, 'push', matte);
+    applyCutoutMatte(img, matte);
+
+    if (fromX < 48) {
+      const i = (32 * width + 50) * 4;
+      assert.equal(data[i], 230, 'red subject moved past its old edge');
+      assert.ok(data[i + 3] >= 245, 'the extended subject stays opaque');
+    } else {
+      const i = (32 * width + 45) * 4;
+      assert.equal(data[i + 3], 0, 'the old cyan backdrop stays transparent');
+    }
+    assert.equal(matte[4 * width + 47], 255, 'the matte outside the brush stays in place');
+  }
+});
+
+test('every liquify mode resamples a soft cutout matte with the same mapping as image alpha', () => {
+  const width = 64, height = 48;
+  const data = new Uint8ClampedArray(width * height * 4);
+  const matte = new Uint8ClampedArray(width * height);
+  for (let p = 0; p < matte.length; p++) {
+    const x = p % width;
+    matte[p] = x < 22 ? 255 : x < 31 ? 110 : 0;
+    data[p * 4 + 3] = matte[p];
+  }
+  const img = { width, height, data };
+  const session = createLiquifySession(img, matte);
+  for (const [mode, fromX] of [['push', 20], ['bloat', 30], ['pinch', 30], ['restore', 30]]) {
+    const before = matte.slice();
+    liquifyDab(session, img, fromX, 24, 30, 24, 18, 1, mode, matte);
+    assert.ok(matte.some((alpha, p) => alpha !== before[p]), mode + ' changes the matte');
+    for (let p = 0; p < matte.length; p++) {
+      // Both planes use bilinear interpolation. Allow one rounding level.
+      assert.ok(Math.abs(matte[p] - data[p * 4 + 3]) <= 1, mode + ' keeps pixel ' + p + ' aligned');
+    }
+  }
 });
 
 test('restore brings the area back to the state when the session began', () => {

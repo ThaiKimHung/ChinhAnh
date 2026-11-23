@@ -50,3 +50,27 @@ export function appendHistoryEntry(
   while (next.length > MIN_ENTRIES && historyBytes(next) > maxBytes) next.shift();
   return { entries: next, index: next.length - 1 };
 }
+
+/** Record a parameter-only edit on an inactive photo without copying its pixels. */
+export function applyStyleToSession(session, style) {
+  const preceding = session.history.slice(0, session.historyIdx);
+  const before = {
+    workData: session.workData,
+    origData: session.origData,
+    origCanvas: session.origCanvas,
+    cutoutAlpha: session.cutoutAlpha,
+    adjustments: session.adjustments,
+    activePreset: session.activePreset,
+    beauty: session.beauty,
+    bgState: session.bgState,
+    textConfig: session.textConfig,
+    frameConfig: session.frameConfig,
+    logoConfig: session.logoConfig,
+    geometry: session.geometry,
+  };
+  preceding.push(before);
+  const next = appendHistoryEntry(preceding, preceding.length - 1, { ...before, ...style }, {
+    maxBytes: historyBudgetBytes(globalThis.navigator?.deviceMemory),
+  });
+  return { ...session, ...style, history: next.entries, historyIdx: next.index };
+}

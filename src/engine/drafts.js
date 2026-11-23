@@ -161,12 +161,15 @@ export async function hydrateSession(session, loadImage = decodeImage) {
     return originalCanvases.get(original);
   };
   const getImage = (blob) => {
-    if (!blob) return null;
+    if (!(blob instanceof Blob)) return null;
     if (!imagePromises.has(blob)) {
       const decoded = (async () => {
         const url = URL.createObjectURL(blob);
         try {
           return await loadImage(url);
+        } catch {
+          // An unreadable overlay can be replaced without losing the edited photo.
+          return null;
         } finally {
           URL.revokeObjectURL(url);
         }
