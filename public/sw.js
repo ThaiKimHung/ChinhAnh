@@ -12,6 +12,9 @@ const MODEL_CACHE = 'chinhanh-ai-models';
 const KEEP = new Set([SHELL_CACHE, ASSET_CACHE, MODEL_CACHE]);
 const SCOPE = new URL(self.registration.scope);
 const SHELL_URL = new URL('./', SCOPE).href;
+// Servers often send `Vary: Origin`, and module scripts are requested with an
+// Origin header, so a strict match would miss entries that are byte-identical.
+const MATCH = { ignoreVary: true };
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -44,7 +47,7 @@ self.addEventListener('activate', (event) => {
 
 async function cacheFirst(request, cacheName) {
   const cache = await caches.open(cacheName);
-  const hit = await cache.match(request);
+  const hit = await cache.match(request, MATCH);
   if (hit) return hit;
   const response = await fetch(request);
   if (response.ok) cache.put(request, response.clone());
@@ -58,7 +61,7 @@ async function networkFirstShell(request) {
     if (response.ok) cache.put(SHELL_URL, response.clone());
     return response;
   } catch (error) {
-    const hit = await cache.match(SHELL_URL);
+    const hit = await cache.match(SHELL_URL, MATCH);
     if (hit) return hit;
     throw error;
   }
@@ -66,7 +69,7 @@ async function networkFirstShell(request) {
 
 async function staleWhileRevalidate(request) {
   const cache = await caches.open(ASSET_CACHE);
-  const hit = await cache.match(request);
+  const hit = await cache.match(request, MATCH);
   const refresh = fetch(request)
     .then((response) => {
       if (response.ok) cache.put(request, response.clone());
