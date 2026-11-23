@@ -1,6 +1,17 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Upload, Sparkles } from 'lucide-react';
 
+const CROP_HANDLES = [
+  { id: 'nw', cls: '-left-2 -top-2 cursor-nwse-resize' },
+  { id: 'n', cls: 'left-1/2 -translate-x-1/2 -top-1.5 cursor-ns-resize' },
+  { id: 'ne', cls: '-right-2 -top-2 cursor-nesw-resize' },
+  { id: 'e', cls: '-right-1.5 top-1/2 -translate-y-1/2 cursor-ew-resize' },
+  { id: 'se', cls: '-right-2 -bottom-2 cursor-nwse-resize' },
+  { id: 's', cls: 'left-1/2 -translate-x-1/2 -bottom-1.5 cursor-ns-resize' },
+  { id: 'sw', cls: '-left-2 -bottom-2 cursor-nesw-resize' },
+  { id: 'w', cls: '-left-1.5 top-1/2 -translate-y-1/2 cursor-ew-resize' },
+];
+
 export default function CanvasStage({
   hasImage,
   displayCanvas,
@@ -26,9 +37,15 @@ export default function CanvasStage({
   cropRect,
   setCropRect,
   cropAspect,
+  straightenAngle = 0,
+  canDragText = false,
+  textPos = null,
+  onDragText,
+  onCommitText,
   onDropFiles,
   onOpenFile,
   onLoadSample,
+  onViewportResize,
 }) {
   const stageRef = useRef(null);
   const viewCanvasRef = useRef(null);
@@ -40,13 +57,25 @@ export default function CanvasStage({
   const [isDrawing, setIsDrawing] = useState(false);
   const [cursorPos, setCursorPos] = useState(null);
   const [cropDrag, setCropDrag] = useState(null);
+  const [draggingText, setDraggingText] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const lastPanRef = useRef({ x: 0, y: 0 });
   const lastImgPosRef = useRef(null);
 
   useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !onViewportResize) return;
+
+    const reportSize = () => onViewportResize({ width: stage.clientWidth, height: stage.clientHeight });
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(stage);
+    reportSize();
+    return () => observer.disconnect();
+  }, [onViewportResize]);
+
+  useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.code === 'Space' && e.target.tagName !== 'INPUT') {
+      if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
         setSpaceDown(true);
       }
     };
@@ -100,27 +129,37 @@ export default function CanvasStage({
     }
   }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion]);
 
-  const clientToImageCoords = useCallback(
-    (clientX, clientY) => {
-      const canvas = viewCanvasRef.current;
-      if (!canvas) return null;
-      const rect = canvas.getBoundingClientRect();
-      const x = ((clientX - rect.left) / rect.width) * canvas.width;
-      const y = ((clientY - rect.top) / rect.height) * canvas.height;
-      return { x, y };
-    },
-    []
-  );
+  const clientToImageCoords = useCallback((clientX, clientY) => {
+    const canvas = viewCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * canvas.width;
+    const y = ((clientY - rect.top) / rect.height) * canvas.height;
+    return { x, y };
+  }, []);
 
   const handleWheel = (e) => {
     if (!hasImage) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    setZoom((z) => Math.min(4, Math.max(0.15, Number((z * factor).toFixed(3)))));
+    const nextZoom = Math.min(4, Math.max(0.15, Number((zoom * factor).toFixed(3))));
+    if (nextZoom === zoom) return;
+
+    const stageRect = stageRef.current?.getBoundingClientRect();
+    if (stageRect) {
+      const mx = e.clientX - (stageRect.left + stageRect.width / 2);
+      const my = e.clientY - (stageRect.top + stageRect.height / 2);
+      const ratio = nextZoom / zoom;
+      setPan({
+        x: mx - (mx - pan.x) * ratio,
+        y: my - (my - pan.y) * ratio,
+      });
+    }
+    setZoom(nextZoom);
   };
 
   const handlePointerDown = (e) => {
-    if (!hasImage) return;
+    if (!hasImage || !e.isPrimary) return;
     if ((e.altKey || pickingCloneSource) && onPickCloneSource && e.button === 0) {
       const pt = clientToImageCoords(e.clientX, e.clientY);
       if (pt) onPickCloneSource(pt.x, pt.y);
@@ -142,10 +181,19 @@ export default function CanvasStage({
   };
 
   const handlePointerMove = (e) => {
+    if (!e.isPrimary) return;
     if (draggingSplit && viewCanvasRef.current) {
       const rect = viewCanvasRef.current.getBoundingClientRect();
       const pct = Math.min(98, Math.max(2, ((e.clientX - rect.left) / rect.width) * 100));
       setSplitPos(pct);
+      return;
+    }
+
+    if (draggingText && viewCanvasRef.current && onDragText) {
+      const rect = viewCanvasRef.current.getBoundingClientRect();
+      const xp = Math.min(95, Math.max(5, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+      const yp = Math.min(95, Math.max(5, Math.round(((e.clientY - rect.top) / rect.height) * 100)));
+      onDragText(xp, yp);
       return;
     }
 
@@ -155,21 +203,69 @@ export default function CanvasStage({
       const dyPct = ((e.clientY - cropDrag.startY) / rect.height) * 100;
       const orig = cropDrag.origRect;
       let { x, y, w, h } = orig;
+      const minSize = 8;
 
       if (cropDrag.type === 'move') {
         x = Math.min(100 - w, Math.max(0, orig.x + dxPct));
         y = Math.min(100 - h, Math.max(0, orig.y + dyPct));
-      } else if (cropDrag.type === 'se') {
-        w = Math.min(100 - orig.x, Math.max(10, orig.w + dxPct));
-        if (cropAspect !== 'free' && imageSize?.width && imageSize?.height) {
-          const [aw, ah] = cropAspect.split(':').map(Number);
-          const targetRatio = aw / ah;
-          const imgRatio = imageSize.width / imageSize.height;
-          h = Math.min(100 - orig.y, (w * imgRatio) / targetRatio);
-        } else {
-          h = Math.min(100 - orig.y, Math.max(10, orig.h + dyPct));
-        }
+        setCropRect({ x, y, w, h });
+        return;
       }
+
+      const right0 = orig.x + orig.w;
+      const bot0 = orig.y + orig.h;
+      const dir = cropDrag.type;
+      const locked = cropAspect !== 'free' && imageSize?.width && imageSize?.height;
+      let pctRatio = null;
+      if (locked) {
+        const [aw, ah] = cropAspect.split(':').map(Number);
+        const targetRatio = aw / ah;
+        const imgRatio = imageSize.width / imageSize.height;
+        pctRatio = imgRatio / targetRatio; // hPct = wPct * pctRatio
+      }
+
+      if (!locked) {
+        if (dir.includes('e')) {
+          w = Math.min(100 - orig.x, Math.max(minSize, orig.w + dxPct));
+        }
+        if (dir.includes('s')) {
+          h = Math.min(100 - orig.y, Math.max(minSize, orig.h + dyPct));
+        }
+        if (dir.includes('w')) {
+          const newX = Math.max(0, Math.min(right0 - minSize, orig.x + dxPct));
+          w = right0 - newX;
+          x = newX;
+        }
+        if (dir.includes('n')) {
+          const newY = Math.max(0, Math.min(bot0 - minSize, orig.y + dyPct));
+          h = bot0 - newY;
+          y = newY;
+        }
+      } else {
+        // Aspect-locked resizing from any corner or edge
+        const anchorX = dir.includes('w') ? right0 : orig.x;
+        const anchorY = dir.includes('n') ? bot0 : orig.y;
+        const maxW = dir.includes('w') ? anchorX : 100 - anchorX;
+        const maxH = dir.includes('n') ? anchorY : 100 - anchorY;
+        const maxWFromH = maxH / pctRatio;
+        const effectiveMaxW = Math.min(maxW, maxWFromH);
+
+        let rawW = orig.w;
+        if (dir.includes('e')) rawW = orig.w + dxPct;
+        else if (dir.includes('w')) rawW = orig.w - dxPct;
+        else if (dir.includes('s')) rawW = (orig.h + dyPct) / pctRatio;
+        else if (dir.includes('n')) rawW = (orig.h - dyPct) / pctRatio;
+
+        w = Math.min(effectiveMaxW, Math.max(minSize, rawW));
+        h = w * pctRatio;
+        if (h < minSize) {
+          h = minSize;
+          w = h / pctRatio;
+        }
+        x = dir.includes('w') ? anchorX - w : anchorX;
+        y = dir.includes('n') ? anchorY - h : anchorY;
+      }
+
       setCropRect({ x, y, w, h });
       return;
     }
@@ -197,10 +293,15 @@ export default function CanvasStage({
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e) => {
+    if (!e.isPrimary) return;
     setDraggingSplit(false);
     setCropDrag(null);
     setIsPanning(false);
+    if (draggingText) {
+      setDraggingText(false);
+      onCommitText?.();
+    }
     if (isDrawing) {
       setIsDrawing(false);
       lastImgPosRef.current = null;
@@ -208,9 +309,7 @@ export default function CanvasStage({
     }
   };
 
-  const displayBrushPx = viewCanvasRef.current && imageSize?.width
-    ? (brushSize * 2 * viewCanvasRef.current.getBoundingClientRect().width) / imageSize.width
-    : brushSize * 2 * zoom;
+  const displayBrushPx = brushSize * 2 * zoom;
 
   return (
     <main
@@ -219,9 +318,13 @@ export default function CanvasStage({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerLeave={() => {
+      onPointerCancel={(e) => {
         setCursorPos(null);
-        handlePointerUp();
+        handlePointerUp(e);
+      }}
+      onPointerLeave={(e) => {
+        setCursorPos(null);
+        handlePointerUp(e);
       }}
       onDragOver={(e) => {
         e.preventDefault();
@@ -235,7 +338,7 @@ export default function CanvasStage({
           onDropFiles(e.dataTransfer.files);
         }
       }}
-      className={`flex-1 relative overflow-hidden bg-[#0c0e13] flex items-center justify-center ${
+      className={`min-h-0 flex-1 relative overflow-hidden bg-[#0c0e13] flex items-center justify-center ${hasImage ? 'touch-none' : ''} ${
         spaceDown || isPanning
           ? 'cursor-grab active:cursor-grabbing'
           : pickingCloneSource
@@ -256,7 +359,7 @@ export default function CanvasStage({
 
       {!hasImage ? (
         <div
-          className={`relative z-10 max-w-md w-full mx-4 p-8 rounded-2xl border-2 border-dashed transition text-center ${
+          className={`relative z-10 max-w-md w-full mx-4 p-5 rounded-2xl border-2 border-dashed transition text-center md:p-8 ${
             dragOver
               ? 'border-amber-400 bg-amber-500/10'
               : 'border-[#2c3345] bg-[#141720]/90'
@@ -265,11 +368,14 @@ export default function CanvasStage({
           <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mb-4">
             <Upload className="w-7 h-7 text-amber-400" />
           </div>
-          <h2 className="text-lg font-bold text-slate-100">Kéo thả ảnh vào đây</h2>
+          <h2 className="text-lg font-bold text-slate-100">
+            <span className="md:hidden">Mở ảnh để bắt đầu</span>
+            <span className="hidden md:inline">Kéo thả ảnh vào đây</span>
+          </h2>
           <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
             Hỗ trợ JPG, PNG, WebP. Toàn bộ quá trình chỉnh màu, làm đẹp da, nắn bóp và tách nền AI xử lý ngay trên trình duyệt của bạn.
           </p>
-          <div className="mt-6 flex items-center justify-center gap-3">
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2 md:mt-6 md:gap-3">
             <button
               onClick={onOpenFile}
               className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-[#0f1116] text-xs font-bold shadow-lg shadow-amber-500/20 cursor-pointer"
@@ -287,19 +393,32 @@ export default function CanvasStage({
         </div>
       ) : (
         <div
-          className="relative shadow-2xl checkerboard-bg"
+          className="relative shrink-0 shadow-2xl checkerboard-bg overflow-hidden"
           style={{
             transform: `translate(${pan.x}px, ${pan.y}px)`,
           }}
         >
           <canvas
             ref={viewCanvasRef}
+            role="img"
+            aria-label="Ảnh xem trước"
             style={{
               width: imageSize ? `${imageSize.width * zoom}px` : 'auto',
               height: imageSize ? `${imageSize.height * zoom}px` : 'auto',
               display: 'block',
+              transform: straightenAngle !== 0 ? `rotate(${straightenAngle}deg) scale(${1 + Math.abs(straightenAngle) * 0.018})` : undefined,
+              transition: straightenAngle !== 0 ? 'transform 0.05s linear' : undefined,
             }}
           />
+
+          {/* Straighten alignment grid */}
+          {straightenAngle !== 0 && !isComparingOriginal && (
+            <div className="absolute inset-0 pointer-events-none z-20 grid grid-cols-4 grid-rows-4">
+              {Array.from({ length: 16 }).map((_, idx) => (
+                <div key={idx} className="border border-amber-400/25" />
+              ))}
+            </div>
+          )}
 
           {/* Clone Source Crosshair */}
           {cloneSource && imageSize && !isComparingOriginal && (
@@ -316,6 +435,25 @@ export default function CanvasStage({
             </div>
           )}
 
+          {/* Direct Text Drag Handle */}
+          {canDragText && textPos && !isComparingOriginal && (
+            <div
+              onPointerDown={(e) => {
+                if (!e.isPrimary) return;
+                e.stopPropagation();
+                setDraggingText(true);
+              }}
+              style={{
+                left: `${textPos.x}%`,
+                top: `${textPos.y}%`,
+              }}
+              title="Kéo để di chuyển chữ trực tiếp"
+              className="absolute -translate-x-1/2 -translate-y-1/2 z-20 px-2.5 py-1 rounded-full border border-dashed border-amber-400 bg-black/45 text-[10px] font-semibold text-amber-300 cursor-move hover:bg-amber-500/20 select-none"
+            >
+              ✛ Kéo chữ
+            </div>
+          )}
+
           {/* Compare Original badge */}
           {isComparingOriginal && (
             <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-black/75 text-amber-300 text-xs font-bold border border-amber-500/40 pointer-events-none">
@@ -328,13 +466,14 @@ export default function CanvasStage({
             <>
               <div
                 onPointerDown={(e) => {
+                  if (!e.isPrimary) return;
                   e.stopPropagation();
                   setDraggingSplit(true);
                 }}
                 style={{ left: `${splitPos}%` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-amber-400 cursor-ew-resize z-20 shadow-[0_0_8px_rgba(0,0,0,0.8)]"
               >
-                <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-amber-400 text-[#0f1116] font-bold text-xs flex items-center justify-center shadow-lg">
+                <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 size-10 rounded-full bg-amber-400 text-[#0f1116] font-bold text-xs flex items-center justify-center shadow-lg md:size-7">
                   ⇄
                 </div>
               </div>
@@ -347,11 +486,12 @@ export default function CanvasStage({
             </>
           )}
 
-          {/* Interactive Crop Overlay */}
+          {/* Interactive 8-Handle Crop Overlay */}
           {cropActive && cropRect && (
             <div className="absolute inset-0 z-20 pointer-events-none">
               <div
                 onPointerDown={(e) => {
+                  if (!e.isPrimary) return;
                   e.stopPropagation();
                   setCropDrag({
                     type: 'move',
@@ -381,19 +521,30 @@ export default function CanvasStage({
                   <div className="border-r border-white/25" />
                   <div />
                 </div>
-                {/* Resize Handle SE */}
-                <div
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    setCropDrag({
-                      type: 'se',
-                      startX: e.clientX,
-                      startY: e.clientY,
-                      origRect: cropRect,
-                    });
-                  }}
-                  className="absolute -right-2 -bottom-2 w-4 h-4 rounded-sm bg-amber-400 border border-[#0f1116] cursor-nwse-resize"
-                />
+
+                {/* Live pixel dimensions badge */}
+                {imageSize && (
+                  <div className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-black/75 text-[10px] font-mono text-amber-300 whitespace-nowrap pointer-events-none">
+                    {Math.round((imageSize.width * cropRect.w) / 100)} × {Math.round((imageSize.height * cropRect.h) / 100)} px
+                  </div>
+                )}
+
+                {CROP_HANDLES.map((h) => (
+                  <div
+                    key={h.id}
+                    onPointerDown={(e) => {
+                      if (!e.isPrimary) return;
+                      e.stopPropagation();
+                      setCropDrag({
+                        type: h.id,
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        origRect: cropRect,
+                      });
+                    }}
+                    className={`absolute w-3.5 h-3.5 rounded-sm bg-amber-400 border border-[#0f1116] ${h.cls}`}
+                  />
+                ))}
               </div>
             </div>
           )}

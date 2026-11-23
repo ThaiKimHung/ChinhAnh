@@ -1,0 +1,24 @@
+.editor-controls .studio-slider:focus-visible {
+  outline: 2px solid var(--accent-gold);
+  outline-offset: 3px;
+}
+
+@media (width < 48rem) {
+  .editor-controls input[type='range'].studio-slider {
+    height: 28px;
+    background: linear-gradient(#2b3140, #2b3140) center / 100% 5px no-repeat;
+  }
+
+  .editor-controls .studio-slider::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+  }
+
+  .editor-controls .studio-slider::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #0f1116;
+    border-radius: 50%;
+    background: var(--accent-gold);
+  }
+}

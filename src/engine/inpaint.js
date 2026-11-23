@@ -6,19 +6,185 @@ function clamp(v, min = 0, max = 255) {
   return v < min ? min : v > max ? max : v;
 }
 
+function colorDistance(buf, a, b) {
+  return Math.max(Math.abs(buf[a] - buf[b]), Math.abs(buf[a + 1] - buf[b + 1]), Math.abs(buf[a + 2] - buf[b + 2]));
+}
+
+function fitColorPlane(samples) {
+  if (samples.length < 16) return null;
+  let sx = 0, sy = 0, xx = 0, yy = 0, xy = 0;
+  const sum = [0, 0, 0];
+  const crossX = [0, 0, 0];
+  const crossY = [0, 0, 0];
+  for (const [x, y, ...rgb] of samples) {
+    sx += x;
+    sy += y;
+    xx += x * x;
+    yy += y * y;
+    xy += x * y;
+    for (let c = 0; c < 3; c++) {
+      sum[c] += rgb[c];
+      crossX[c] += x * rgb[c];
+      crossY[c] += y * rgb[c];
+    }
+  }
+  const n = samples.length;
+  xx -= sx * sx / n;
+  yy -= sy * sy / n;
+  xy -= sx * sy / n;
+  const determinant = xx * yy - xy * xy;
+  if (determinant <= 0.001 * xx * yy || determinant <= 0) return null;
+  return sum.map((total, c) => {
+    const vx = crossX[c] - sx * total / n;
+    const vy = crossY[c] - sy * total / n;
+    const dx = (yy * vx - xy * vy) / determinant;
+    const dy = (xx * vy - xy * vx) / determinant;
+    return [(total - sx * dx - sy * dy) / n, dx, dy];
+  });
+}
+
+function planeError([x, y, ...rgb], plane) {
+  return Math.max(...plane.map(([base, dx, dy], c) => Math.abs(rgb[c] - (base + dx * x + dy * y))));
+}
+
+function predictSmoothBackground(buf, known, width, height, order, bounds) {
+  const [minX, minY, maxX, maxY] = bounds;
+  const left = Math.max(0, minX - 12), top = Math.max(0, minY - 12);
+  const right = Math.min(width - 1, maxX + 12), bottom = Math.min(height - 1, maxY + 12);
+  const step = Math.max(1, Math.floor(Math.sqrt((right - left + 1) * (bottom - top + 1) / 1800)));
+  const samples = [];
+  for (let y = top; y <= bottom; y += step) {
+    for (let x = left; x <= right; x += step) {
+      const p = y * width + x;
+      if (known[p]) samples.push([x, y, buf[p * 3], buf[p * 3 + 1], buf[p * 3 + 2]]);
+    }
+  }
+  const initial = fitColorPlane(samples);
+  if (!initial) return false;
+  const ranked = samples.map((sample) => ({ sample, error: planeError(sample, initial) }));
+  ranked.sort((a, b) => a.error - b.error);
+  const core = Math.ceil(samples.length * 0.82);
+  const plane = fitColorPlane(ranked.slice(0, core).map(({ sample }) => sample));
+  if (!plane) return false;
+  let support = 0;
+  let errorSum = 0;
+  for (const sample of samples) {
+    const error = planeError(sample, plane);
+    if (error <= 7) {
+      support++;
+      errorSum += error;
+    }
+  }
+  if (support < samples.length * 0.82 || errorSum > support * 3) return false;
+
+  for (const p of order) {
+    const x = p % width, y = (p - x) / width;
+    for (let c = 0; c < 3; c++) {
+      const [base, dx, dy] = plane[c];
+      buf[p * 3 + c] = clamp(base + dx * x + dy * y);
+    }
+  }
+  return true;
+}
+
+function matchesTranslation(buf, known, width, height, dx, dy, step) {
+  let pairs = 0;
+  let outliers = 0;
+  let totalError = 0;
+  for (let p = 0; p < known.length; p += step) {
+    if (!known[p]) continue;
+    const x = p % width, y = (p - x) / width;
+    const sx = x + dx, sy = y + dy;
+    if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+    const source = sy * width + sx;
+    if (!known[source]) continue;
+    const error = colorDistance(buf, p * 3, source * 3);
+    pairs++;
+    totalError += error;
+    if (error > 5) outliers++;
+  }
+  return pairs >= 32 && outliers <= pairs * 0.003 && totalError <= pairs;
+}
+
+function copyRepeatedTexture(buf, known, width, height, order) {
+  if (order.length > 120000 || width < 3 || height < 3) return false;
+  const translations = [[1, 1], [1, -1], [2, 1], [2, -1], [1, 2], [1, -2]];
+  for (let spacing = 1; spacing <= 40; spacing++) {
+    if (spacing <= width / 2) translations.push([spacing, 0]);
+    if (spacing <= height / 2) translations.push([0, spacing]);
+  }
+  const stride = Math.max(1, Math.floor(known.length / 1600)) | 1;
+  const confirmStride = Math.max(1, Math.floor(known.length / 30000));
+  const maxSteps = Math.min(160, Math.floor(1000000 / order.length));
+  const sources = new Int32Array(order.length);
+  for (const [dx, dy] of translations) {
+    if (!matchesTranslation(buf, known, width, height, dx, dy, stride)
+      || !matchesTranslation(buf, known, width, height, dx, dy, confirmStride)) continue;
+    let covered = 0;
+    for (let i = 0; i < order.length; i++) {
+      const p = order[i];
+      const x = p % width, y = (p - x) / width;
+      let source = -1;
+      for (let step = 1; step <= maxSteps; step++) {
+        const ax = x + dx * step, ay = y + dy * step;
+        const bx = x - dx * step, by = y - dy * step;
+        const a = ax >= 0 && ax < width && ay >= 0 && ay < height;
+        const b = bx >= 0 && bx < width && by >= 0 && by < height;
+        if (!a && !b) break;
+        if (a && known[ay * width + ax]) {
+          source = ay * width + ax;
+          break;
+        }
+        if (b && known[by * width + bx]) {
+          source = by * width + bx;
+          break;
+        }
+      }
+      if (source < 0) break;
+      sources[i] = source;
+      covered++;
+    }
+    if (covered !== order.length) continue;
+    for (let i = 0; i < order.length; i++) {
+      const target = order[i] * 3, source = sources[i] * 3;
+      buf[target] = buf[source];
+      buf[target + 1] = buf[source + 1];
+      buf[target + 2] = buf[source + 2];
+    }
+    return true;
+  }
+  return false;
+}
+
+function writeInpaintedPixels(data, buf, order, width, regionWidth, left, top) {
+  for (const p of order) {
+    const x = p % regionWidth, y = (p - x) / regionWidth;
+    const to = ((top + y) * width + left + x) * 4;
+    const from = p * 3;
+    data[to] = buf[from];
+    data[to + 1] = buf[from + 1];
+    data[to + 2] = buf[from + 2];
+  }
+}
+
 /**
- * Inpaint masked region (mask[p] > 0) using onion-peel structure init
- * followed by local exemplar patch synthesis so textures (grass, wall, sky) stay natural.
+ * Extend smooth surfaces and repeating textures from visible pixels, then
+ * use local exemplar patches for other backgrounds.
  */
 export function inpaintMaskedRegion(imageData, mask) {
   const { width, height, data } = imageData;
+  if (mask.length !== width * height) return false;
 
   // 1. Find bounding box of mask
   let minX = width, minY = height, maxX = -1, maxY = -1;
   let maskCount = 0;
+  let visibleCount = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (mask[y * width + x] > 0) {
+      const p = y * width + x;
+      if (!data[p * 4 + 3]) continue;
+      visibleCount++;
+      if (mask[p] > 0) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
@@ -27,7 +193,7 @@ export function inpaintMaskedRegion(imageData, mask) {
       }
     }
   }
-  if (maskCount === 0) return false;
+  if (maskCount === 0 || maskCount === visibleCount) return false;
 
   const pad = Math.min(96, Math.max(48, Math.round(Math.max(maxX - minX, maxY - minY) * 0.45)));
   const rx0 = Math.max(0, minX - pad);
@@ -36,6 +202,7 @@ export function inpaintMaskedRegion(imageData, mask) {
   const ry1 = Math.min(height - 1, maxY + pad);
   const rw = rx1 - rx0 + 1;
   const rh = ry1 - ry0 + 1;
+  if (rw * rh > 4_000_000) return false;
 
   const origKnown = new Uint8Array(rw * rh);
   const filled = new Uint8Array(rw * rh);
@@ -52,6 +219,10 @@ export function inpaintMaskedRegion(imageData, mask) {
       const gx = rx0 + x;
       const li = y * rw + x;
       const gi = gy * width + gx;
+      if (!data[gi * 4 + 3]) {
+        dist[li] = -2;
+        continue;
+      }
       const isMasked = mask[gi] > 0;
       if (!isMasked) {
         origKnown[li] = 1;
@@ -64,6 +235,7 @@ export function inpaintMaskedRegion(imageData, mask) {
       buf[li * 3 + 2] = data[gi * 4 + 2];
     }
   }
+  if (qTail === 0) return false;
 
   // 2. BFS onion-peel distance from unmasked boundary
   const layerOrder = [];
@@ -85,6 +257,13 @@ export function inpaintMaskedRegion(imageData, mask) {
         layerOrder.push(nli);
       }
     }
+  }
+  if (layerOrder.length !== maskCount) return false;
+
+  if (predictSmoothBackground(buf, origKnown, rw, rh, layerOrder, [minX - rx0, minY - ry0, maxX - rx0, maxY - ry0])
+    || copyRepeatedTexture(buf, origKnown, rw, rh, layerOrder)) {
+    writeInpaintedPixels(data, buf, layerOrder, width, rw, rx0, ry0);
+    return true;
   }
 
   // 3. Initial smooth structure fill from neighbors (outer-to-inner)
@@ -151,7 +330,7 @@ export function inpaintMaskedRegion(imageData, mask) {
 
   // 5. Exemplar patch synthesis from boundary inward
   if (candidates.length > 0) {
-    const maxLocalCand = 140;
+    const maxLocalCand = Math.min(140, Math.max(12, Math.floor(1_500_000 / maskCount)));
     for (let idx = 0; idx < layerOrder.length; idx++) {
       const li = layerOrder[idx];
       if (filled[li]) continue;
@@ -169,7 +348,7 @@ export function inpaintMaskedRegion(imageData, mask) {
           if (nx < 0 || nx >= rw) continue;
           const nli = ny * rw + nx;
           if (filled[nli]) {
-            offsets.push([ox, oy, buf[nli * 3], buf[nli * 3 + 1], buf[nli * 3 + 2]]);
+            offsets.push([ox, oy, nli * 3, origKnown[nli] ? 2 : 1]);
           }
         }
       }
@@ -197,19 +376,17 @@ export function inpaintMaskedRegion(imageData, mask) {
         const ddy = cand.y - py;
         if (ddx * ddx + ddy * ddy > searchR2 && checked > 15) continue;
         checked++;
-
-        let err = 0;
-        for (let k = 0; k < offsets.length; k++) {
-          const [ox, oy, tr, tg, tb] = offsets[k];
-          const qIdx = ((cand.y + oy) * rw + (cand.x + ox)) * 3;
-          const dr = buf[qIdx] - tr;
-          const dg = buf[qIdx + 1] - tg;
-          const db = buf[qIdx + 2] - tb;
-          err += dr * dr + dg * dg + db * db;
-          if (err >= bestErr) break;
+        let error = 0;
+        for (const [ox, oy, target, weight] of offsets) {
+          const source = ((cand.y + oy) * rw + cand.x + ox) * 3;
+          const dr = buf[source] - buf[target];
+          const dg = buf[source + 1] - buf[target + 1];
+          const db = buf[source + 2] - buf[target + 2];
+          error += weight * (dr * dr + dg * dg + db * db);
+          if (error >= bestErr) break;
         }
-        if (err < bestErr) {
-          bestErr = err;
+        if (error < bestErr) {
+          bestErr = error;
           bestX = cand.x;
           bestY = cand.y;
         }
@@ -232,7 +409,7 @@ export function inpaintMaskedRegion(imageData, mask) {
           const sx = bestX + ox;
           if (tx < 0 || tx >= rw || sx < 0 || sx >= rw) continue;
           const tli = ty * rw + tx;
-          if (origKnown[tli]) continue;
+          if (dist[tli] <= 0) continue;
           const sIdx = (sy * rw + sx) * 3;
           if (!filled[tli]) {
             buf[tli * 3] = buf[sIdx];
@@ -250,11 +427,12 @@ export function inpaintMaskedRegion(imageData, mask) {
     }
   }
 
-  // 6. Gentle seam smoothing on the outer mask rim (dist <= 2)
-  const copy = new Float32Array(buf);
-  for (let idx = 0; idx < layerOrder.length; idx++) {
+  // 6. Smooth minor joins on the rim while preserving contrasting edges.
+  let rimLength = 0;
+  while (rimLength < layerOrder.length && dist[layerOrder[rimLength]] <= 2) rimLength++;
+  const rim = new Float32Array(rimLength * 3);
+  for (let idx = 0; idx < rimLength; idx++) {
     const li = layerOrder[idx];
-    if (dist[li] > 2) break;
     const x = li % rw;
     const y = (li - x) / rw;
     let sr = 0, sg = 0, sb = 0, cnt = 0;
@@ -264,32 +442,25 @@ export function inpaintMaskedRegion(imageData, mask) {
         const ny = y + oy;
         if (nx < 0 || nx >= rw || ny < 0 || ny >= rh) continue;
         const nIdx = (ny * rw + nx) * 3;
-        sr += copy[nIdx];
-        sg += copy[nIdx + 1];
-        sb += copy[nIdx + 2];
+        if (dist[ny * rw + nx] < 0 || colorDistance(buf, li * 3, nIdx) > 28) continue;
+        sr += buf[nIdx];
+        sg += buf[nIdx + 1];
+        sb += buf[nIdx + 2];
         cnt++;
       }
     }
-    if (cnt > 0) {
-      buf[li * 3] = buf[li * 3] * 0.45 + (sr / cnt) * 0.55;
-      buf[li * 3 + 1] = buf[li * 3 + 1] * 0.45 + (sg / cnt) * 0.55;
-      buf[li * 3 + 2] = buf[li * 3 + 2] * 0.45 + (sb / cnt) * 0.55;
-    }
+    rim[idx * 3] = buf[li * 3] * 0.55 + (sr / cnt) * 0.45;
+    rim[idx * 3 + 1] = buf[li * 3 + 1] * 0.55 + (sg / cnt) * 0.45;
+    rim[idx * 3 + 2] = buf[li * 3 + 2] * 0.55 + (sb / cnt) * 0.45;
+  }
+  for (let idx = 0; idx < rimLength; idx++) {
+    const li = layerOrder[idx];
+    buf[li * 3] = rim[idx * 3];
+    buf[li * 3 + 1] = rim[idx * 3 + 1];
+    buf[li * 3 + 2] = rim[idx * 3 + 2];
   }
 
-  // 7. Write back to ImageData
-  for (let y = 0; y < rh; y++) {
-    const gy = ry0 + y;
-    for (let x = 0; x < rw; x++) {
-      const gx = rx0 + x;
-      const li = y * rw + x;
-      if (origKnown[li]) continue;
-      const gi4 = (gy * width + gx) * 4;
-      data[gi4] = clamp(Math.round(buf[li * 3]));
-      data[gi4 + 1] = clamp(Math.round(buf[li * 3 + 1]));
-      data[gi4 + 2] = clamp(Math.round(buf[li * 3 + 2]));
-    }
-  }
+  writeInpaintedPixels(data, buf, layerOrder, width, rw, rx0, ry0);
   return true;
 }
 
@@ -305,7 +476,16 @@ export function applyCloneStampStroke(imageData, cx, cy, offsetX, offsetY, radiu
   const minY = Math.max(0, Math.floor(cy - r));
   const maxY = Math.min(height - 1, Math.ceil(cy + r));
 
-  const snapshot = new Uint8ClampedArray(data);
+  // Snapshot only the destination bounding box so brush moves stay fast on large images
+  const roiW = maxX - minX + 1;
+  const roiH = maxY - minY + 1;
+  const dstSnap = new Uint8ClampedArray(roiW * roiH * 4);
+  for (let y = minY; y <= maxY; y++) {
+    const srcStart = (y * width + minX) * 4;
+    const dstStart = (y - minY) * roiW * 4;
+    dstSnap.set(data.subarray(srcStart, srcStart + roiW * 4), dstStart);
+  }
+
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       const dx = x - cx;
@@ -319,10 +499,18 @@ export function applyCloneStampStroke(imageData, cx, cy, offsetX, offsetY, radiu
 
       const falloff = Math.pow(1 - d2 / r2, 1.5) * Math.min(1, strength);
       const ti = (y * width + x) * 4;
-      const si = (sy * width + sx) * 4;
-      data[ti] = data[ti] + (snapshot[si] - data[ti]) * falloff;
-      data[ti + 1] = data[ti + 1] + (snapshot[si + 1] - data[ti + 1]) * falloff;
-      data[ti + 2] = data[ti + 2] + (snapshot[si + 2] - data[ti + 2]) * falloff;
+
+      // Snapshot overlapping samples and interpolate premultiplied channels.
+      const overlap = sx >= minX && sx <= maxX && sy >= minY && sy <= maxY;
+      const source = overlap ? dstSnap : data;
+      const si = overlap ? ((sy - minY) * roiW + sx - minX) * 4 : (sy * width + sx) * 4;
+      const srcWeight = source[si + 3] * falloff;
+      const dstWeight = data[ti + 3] * (1 - falloff);
+      const alpha = srcWeight + dstWeight;
+      for (let c = 0; c < 3; c++) {
+        data[ti + c] = alpha ? (source[si + c] * srcWeight + data[ti + c] * dstWeight) / alpha : 0;
+      }
+      data[ti + 3] = alpha;
     }
   }
 }
