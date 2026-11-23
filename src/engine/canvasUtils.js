@@ -78,3 +78,16 @@ export function transformAlphaMask(alpha, width, height, operation) {
   for (let p = 0, i = 0; p < next.length; p++, i += 4) next[p] = out[i + 3];
   return next;
 }
+
+/**
+ * onScroll handler for layout frames that must never scroll. Browsers without
+ * `overflow: clip` can still scroll an overflow:hidden box when a control gets
+ * focus, which silently shifts the whole view; snap it back.
+ */
+export function resetFrameScroll(event) {
+  const el = event.currentTarget;
+  if (el.scrollTop || el.scrollLeft) {
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+  }
+}

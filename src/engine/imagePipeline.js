@@ -1,6 +1,6 @@
 import { createLiquifySession, liquifyDab } from './liquify.js';
 import { getSkinMask, sampleSkinMask } from './skinMask.js';
-import { fitOverlay } from './overlayLayout.js';
+import { fitOverlay, wrapCaption } from './overlayLayout.js';
 
 export const DEFAULT_HSL = {
   red: [0, 0, 0],
@@ -1313,16 +1313,27 @@ export function renderTextAndFrame(ctx, w, h, textConfig, frameConfig, logoConfi
         }
       }
     } else {
-      const metrics = ctx.measureText(textConfig.content);
-      const textWidth = Math.max(metrics.width, metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight || 0);
-      const textHeight = Math.max(scaledSize * 1.2, (metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent) || 0);
-      const fit = fitOverlay(w, h, textWidth, textHeight, textConfig.x ?? 50, textConfig.y ?? 90);
+      // Long captions wrap onto up to three balanced lines before shrinking.
+      const margin = Math.min(w, h) * 0.025;
+      const lines = wrapCaption(textConfig.content, (t) => ctx.measureText(t).width, w - margin * 2);
+      const lineHeight = scaledSize * 1.25;
+      const blockWidth = Math.max(...lines.map((t) => {
+        const m = ctx.measureText(t);
+        return Math.max(m.width, m.actualBoundingBoxLeft + m.actualBoundingBoxRight || 0);
+      }));
+      const blockHeight = lines.length === 1 ? scaledSize * 1.2 : lineHeight * lines.length;
+      const fit = fitOverlay(w, h, blockWidth, blockHeight, textConfig.x ?? 50, textConfig.y ?? 90);
       const fitSize = scaledSize * fit.scale;
       ctx.font = `${italic}${weight} ${fitSize}px ${family}`;
       ctx.lineWidth = Math.min(Math.min(w, h) * 0.03, Math.max(2, fitSize * 0.08));
       const tx = fit.x + fit.width / 2;
       const ty = fit.y + fit.height / 2;
-      drawOne(tx, ty);
+      const step = fit.height / lines.length;
+      lines.forEach((line, k) => {
+        const ly = fit.y + step * (k + 0.5);
+        if (textConfig.strokeEnabled) ctx.strokeText(line, tx, ly);
+        ctx.fillText(line, tx, ly);
+      });
       textAnchor = { x: 100 * tx / w, y: 100 * ty / h };
     }
     ctx.restore();

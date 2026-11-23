@@ -89,3 +89,10 @@ input[type='range'].studio-slider::-webkit-slider-thumb:hover {
 ::-webkit-scrollbar-thumb:hover {
   background: #40485e;
 }
+
+/* Layout frames that must never scroll: unlike overflow:hidden, overflow:clip
+   also stops the browser from scrolling them when a control takes focus. */
+.frame-clip {
+  overflow: hidden;
+  overflow: clip;
+}

@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Upload, Sparkles } from 'lucide-react';
 import { MAX_ZOOM, MIN_ZOOM, startPinch, updatePinch } from '../engine/pinch';
 import { normalizeRect } from '../engine/patch';
+import { resetFrameScroll } from '../engine/canvasUtils';
 
 const CROP_HANDLES = [
   { id: 'nw', cls: '-left-2 -top-2 cursor-nwse-resize' },
@@ -472,7 +473,8 @@ export default function CanvasStage({
           onDropFiles(e.dataTransfer.files);
         }
       }}
-      className={`min-h-0 flex-1 relative overflow-hidden bg-[#0c0e13] flex items-center justify-center ${hasImage ? 'touch-none' : ''} ${
+      onScroll={resetFrameScroll}
+      className={`min-h-0 flex-1 relative frame-clip bg-[#0c0e13] flex items-center justify-center ${hasImage ? 'touch-none' : ''} ${
         spaceDown || isPanning || inspectionBackground
           ? 'cursor-grab active:cursor-grabbing'
           : pickingCloneSource || patchActive

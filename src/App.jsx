@@ -46,6 +46,7 @@ import {
   imageSizeOf,
   rasterize,
   readImage,
+  resetFrameScroll,
   transformAlphaMask,
   workingSizeOf,
 } from './engine/canvasUtils';
@@ -1268,7 +1269,7 @@ export default function App() {
   const draftMessage = DRAFT_MESSAGES[draft.status];
 
   return (
-    <div className="relative h-dvh w-full flex flex-col bg-[#0f1116] text-slate-100 overflow-hidden">
+    <div className="relative h-dvh w-full flex flex-col bg-[#0f1116] text-slate-100 frame-clip" onScroll={resetFrameScroll}>
       <input
         ref={fileInputRef}
         type="file"

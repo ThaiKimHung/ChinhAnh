@@ -81,3 +81,15 @@ test('a photo that is skin-coloured all over (wood, sand) is not treated as skin
   const skin = computeSkinMask(img);
   assert.ok(sampleSkinMask(skin, 60, 80) < 0.15, `wood ${sampleSkinMask(skin, 60, 80)}`);
 });
+
+test('overexposed (washed-out) photos still get a skin mask', () => {
+  const wash = (c) => c.map((v) => v * 0.65 + 0.35 * 255);
+  const img = paint(120, 160, (x, y) => {
+    if ((x - 60) ** 2 / 30 ** 2 + (y - 60) ** 2 / 40 ** 2 < 1) return wash(SKIN);
+    if (x < 8) return wash([20, 20, 25]); // some dark detail (hair) lifted by the wash
+    return wash([90, 100, 115]);
+  });
+  const skin = computeSkinMask(img);
+  assert.ok(sampleSkinMask(skin, 60, 60) > 0.6, `face ${sampleSkinMask(skin, 60, 60)}`);
+  assert.ok(sampleSkinMask(skin, 100, 140) < 0.15, `backdrop ${sampleSkinMask(skin, 100, 140)}`);
+});

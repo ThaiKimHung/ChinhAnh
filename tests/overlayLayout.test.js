@@ -19,3 +19,18 @@ test('an oversized caption fits while a smaller caption keeps its requested anch
   assert.equal(short.x + short.width / 2, 250);
   assert.equal(short.y + short.height / 2, 540);
 });
+
+test('a long caption wraps into balanced lines instead of shrinking on one line', async () => {
+  const { wrapCaption } = await import('../src/engine/overlayLayout.js');
+  const measure = (t) => t.length * 10;
+  const text = 'Studio Ánh Hồng — Chụp ảnh cưới, ảnh thẻ, ảnh gia đình — 0909 123 456';
+  const lines = wrapCaption(text, measure, 400);
+  assert.ok(lines.length >= 2 && lines.length <= 3, JSON.stringify(lines));
+  assert.equal(lines.join(' '), text);
+  assert.ok(lines.every((l) => measure(l) <= 400));
+  const widths = lines.map(measure);
+  assert.ok(Math.max(...widths) - Math.min(...widths) <= 200, 'lines are roughly balanced');
+  assert.deepEqual(wrapCaption('Ngắn', measure, 400), ['Ngắn']);
+  // Far too long for three lines: still at most three lines (the renderer scales them).
+  assert.equal(wrapCaption('a '.repeat(200).trim(), measure, 100).length, 3);
+});

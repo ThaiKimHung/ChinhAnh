@@ -88,7 +88,7 @@ export default function TopBar({
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-lg shadow-amber-500/20" aria-hidden="true">
               <Sparkles className="w-4 h-4 text-[#0f1116]" />
             </div>
-            <div className={`${hasImage ? 'hidden min-[420px]:block' : ''} leading-tight`}>
+            <div className={`${hasImage ? 'hidden min-[420px]:block md:hidden xl:block' : ''} leading-tight`}>
               <div className="text-sm font-bold tracking-wide text-slate-100">
                 LK Magic <span className="text-amber-400">Web</span>
               </div>
@@ -98,10 +98,12 @@ export default function TopBar({
 
           <button
             onClick={onOpenFile}
+            aria-label="Mở ảnh"
+            title="Mở ảnh (Ctrl+O)"
             className="flex min-h-10 items-center gap-1.5 px-2 py-1.5 rounded-lg bg-[#202532] hover:bg-[#293041] text-slate-200 text-xs font-medium border border-[#2f3647] transition cursor-pointer md:min-h-0 md:px-3"
           >
             <Upload className="w-3.5 h-3.5 text-amber-400" />
-            <span>Mở ảnh</span>
+            <span className={hasImage ? 'md:hidden lg:inline' : ''}>Mở ảnh</span>
           </button>
 
           {imageCount > 0 && (
@@ -124,7 +126,7 @@ export default function TopBar({
           <ResolutionSelect
             value={workMaxDim}
             onChange={onChangeWorkMaxDim}
-            className="hidden px-2 py-1.5 text-[11px] lg:block"
+            className="hidden px-2 py-1.5 text-[11px] xl:block"
           />
         </div>
 
@@ -163,7 +165,7 @@ export default function TopBar({
                 }`}
               >
                 <SplitSquareHorizontal className="w-3.5 h-3.5" />
-                <span className="hidden lg:inline">Chia đôi</span>
+                <span className="hidden xl:inline">Chia đôi</span>
               </button>
               <button
                 onPointerDown={(e) => {
@@ -184,7 +186,7 @@ export default function TopBar({
                 className="flex size-10 items-center justify-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-slate-300 hover:bg-[#262c3b] active:bg-amber-500/20 active:text-amber-300 transition cursor-pointer md:size-auto"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span className="hidden lg:inline">Giữ xem gốc</span>
+                <span className="hidden xl:inline">Giữ xem gốc</span>
               </button>
               <button
                 type="button"
@@ -236,8 +238,8 @@ export default function TopBar({
             title="Cài đặt và phím tắt"
             className="grid size-10 place-items-center p-1.5 rounded-lg bg-[#1b1f29] hover:bg-[#262c3b] border border-[#282e3d] text-slate-400 hover:text-amber-300 transition cursor-pointer md:size-auto"
           >
-            <Settings2 className="size-4 lg:hidden" />
-            <HelpCircle className="hidden size-4 lg:block" />
+            <Settings2 className="size-4 xl:hidden" />
+            <HelpCircle className="hidden size-4 xl:block" />
           </button>
 
           {hasImage && (
@@ -248,7 +250,7 @@ export default function TopBar({
                 className="hidden items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#202532] hover:bg-rose-500/15 hover:border-rose-500/40 hover:text-rose-300 text-slate-300 text-xs font-medium border border-[#2f3647] transition cursor-pointer md:flex"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span className="hidden lg:inline">Khôi phục gốc</span>
+                <span className="hidden xl:inline">Khôi phục gốc</span>
               </button>
               <button
                 onClick={onOpenExport}
@@ -282,7 +284,7 @@ export default function TopBar({
           </button>
         </div>
         <div className="space-y-4 p-4">
-          <label className="block space-y-1.5 text-xs text-slate-300 lg:hidden">
+          <label className="block space-y-1.5 text-xs text-slate-300 xl:hidden">
             <span>Độ phân giải tối đa khi nạp ảnh mới</span>
             <ResolutionSelect value={workMaxDim} onChange={onChangeWorkMaxDim} className="block w-full px-3 py-2.5 text-sm" />
           </label>
