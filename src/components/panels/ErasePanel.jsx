@@ -16,6 +16,8 @@ export default function ErasePanel({
   cloneSource,
   pickingCloneSource,
   setPickingCloneSource,
+  cloneToneMatch,
+  setCloneToneMatch,
 }) {
   return (
     <div className="space-y-4">
@@ -105,6 +107,19 @@ export default function ErasePanel({
             onChange={setBrushStrength}
             onReset={() => setBrushStrength(85)}
           />
+
+          <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cloneToneMatch}
+              onChange={(e) => setCloneToneMatch(e.target.checked)}
+              className="mt-0.5 accent-amber-500"
+            />
+            <span>
+              Hòa sáng tối theo vùng đích
+              <span className="block text-[11px] text-slate-500">Tránh mảng vá sáng/tối hơn xung quanh. Tắt khi cần chép y nguyên.</span>
+            </span>
+          </label>
 
           <button
             onClick={() => setPickingCloneSource((v) => !v)}

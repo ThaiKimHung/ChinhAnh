@@ -266,168 +266,405 @@ export function inpaintMaskedRegion(imageData, mask) {
     return true;
   }
 
-  // 3. Initial smooth structure fill from neighbors (outer-to-inner)
-  const initFilled = new Uint8Array(origKnown);
-  for (let idx = 0; idx < layerOrder.length; idx++) {
-    const li = layerOrder[idx];
-    const x = li % rw;
-    const y = (li - x) / rw;
-    let sr = 0, sg = 0, sb = 0, wsum = 0;
-    for (let oy = -1; oy <= 1; oy++) {
-      for (let ox = -1; ox <= 1; ox++) {
-        if (ox === 0 && oy === 0) continue;
-        const nx = x + ox;
-        const ny = y + oy;
-        if (nx < 0 || nx >= rw || ny < 0 || ny >= rh) continue;
-        const nli = ny * rw + nx;
-        if (initFilled[nli]) {
-          const w = ox === 0 || oy === 0 ? 1.0 : 0.7;
-          sr += buf[nli * 3] * w;
-          sg += buf[nli * 3 + 1] * w;
-          sb += buf[nli * 3 + 2] * w;
-          wsum += w;
-        }
+  // 3. Structure-first exemplar fill (Criminisi-style): patches are copied in
+  // order of priority, so contours entering the hole are continued before
+  // flat areas are filled.
+  const srcMap = new Int32Array(rw * rh).fill(-1);
+  exemplarFill(buf, origKnown, filled, dist, rw, rh, maskCount, srcMap);
+  poissonBlend(buf, origKnown, srcMap, dist, layerOrder, rw, rh);
+
+  // 4. Smooth minor joins on the rim while preserving contrasting edges.
+  smoothRim(buf, dist, layerOrder, rw, rh);
+
+  writeInpaintedPixels(data, buf, layerOrder, width, rw, rx0, ry0);
+  return true;
+}
+
+const PATCH_R = 4; // 9×9 patches
+
+function luminance(buf, p) {
+  return 0.299 * buf[p * 3] + 0.587 * buf[p * 3 + 1] + 0.114 * buf[p * 3 + 2];
+}
+
+/** Isophote strength along the fill front: |∇I⊥ · n| / 255 (Criminisi data term). */
+function dataTerm(buf, filled, rw, rh, x, y) {
+  // Image gradient from filled neighbours (central differences where possible).
+  let gx = 0, gy = 0, best = -1;
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      const cx = x + ox, cy = y + oy;
+      if (cx < 1 || cy < 1 || cx >= rw - 1 || cy >= rh - 1) continue;
+      const c = cy * rw + cx;
+      if (!filled[c - 1] || !filled[c + 1] || !filled[c - rw] || !filled[c + rw]) continue;
+      const dx = (luminance(buf, c + 1) - luminance(buf, c - 1)) * 0.5;
+      const dy = (luminance(buf, c + rw) - luminance(buf, c - rw)) * 0.5;
+      const m = dx * dx + dy * dy;
+      if (m > best) {
+        best = m;
+        gx = dx;
+        gy = dy;
       }
     }
-    if (wsum > 0) {
-      buf[li * 3] = sr / wsum;
-      buf[li * 3 + 1] = sg / wsum;
-      buf[li * 3 + 2] = sb / wsum;
-      initFilled[li] = 1;
-    }
   }
+  if (best <= 0) return 0;
+  // Front normal from the filled-indicator gradient.
+  const f = (cx, cy) => (cx < 0 || cy < 0 || cx >= rw || cy >= rh ? 1 : filled[cy * rw + cx]);
+  let nx = f(x + 1, y) - f(x - 1, y);
+  let ny = f(x, y + 1) - f(x, y - 1);
+  const nl = Math.hypot(nx, ny);
+  if (nl === 0) return 0;
+  nx /= nl;
+  ny /= nl;
+  // Isophote is the gradient rotated by 90°.
+  return Math.abs(-gy * nx + gx * ny) / 255;
+}
 
-  // 4. Pre-mark valid candidate patch centers (entire 7x7 must be unmasked)
-  const patchR = 3;
-  const stampR = maskCount > 15000 ? 2 : 1; // 5x5 stamp for huge masks, 3x3 for crisp detail
+function exemplarFill(buf, origKnown, filled, dist, rw, rh, maskCount, srcMap) {
+  const P = PATCH_R;
+  const conf = new Float32Array(rw * rh);
+  for (let i = 0; i < conf.length; i++) conf[i] = origKnown[i] ? 1 : 0;
+
+  // Valid source centres: the whole patch is original, visible pixels.
   const validSrc = new Uint8Array(rw * rh);
-  for (let y = patchR; y < rh - patchR; y++) {
-    for (let x = patchR; x < rw - patchR; x++) {
+  let validCount = 0;
+  const rowRun = new Int32Array(rw * rh);
+  for (let y = 0; y < rh; y++) {
+    let run = 0;
+    for (let x = 0; x < rw; x++) {
+      run = origKnown[y * rw + x] ? run + 1 : 0;
+      rowRun[y * rw + x] = run;
+    }
+  }
+  for (let y = P; y < rh - P; y++) {
+    for (let x = P; x < rw - P; x++) {
       let ok = true;
-      for (let oy = -patchR; oy <= patchR && ok; oy++) {
-        const row = (y + oy) * rw + x;
-        for (let ox = -patchR; ox <= patchR; ox++) {
-          if (!origKnown[row + ox]) {
-            ok = false;
-            break;
-          }
-        }
-      }
-      if (ok) validSrc[y * rw + x] = 1;
-    }
-  }
-
-  // Collect candidate pool sampled sparsely for speed
-  const candStep = rw * rh > 160000 ? 4 : 3;
-  const candidates = [];
-  for (let y = patchR; y < rh - patchR; y += candStep) {
-    for (let x = patchR; x < rw - patchR; x += candStep) {
-      if (validSrc[y * rw + x]) {
-        candidates.push({ x, y });
+      for (let oy = -P; oy <= P && ok; oy++) ok = rowRun[(y + oy) * rw + x + P] >= 2 * P + 1;
+      if (ok) {
+        validSrc[y * rw + x] = 1;
+        validCount++;
       }
     }
   }
+  const unknown = (i) => dist[i] > 0 && !filled[i];
+  if (validCount === 0) {
+    fillByDiffusion(buf, filled, dist, rw, rh);
+    return;
+  }
 
-  // 5. Exemplar patch synthesis from boundary inward
-  if (candidates.length > 0) {
-    const maxLocalCand = Math.min(140, Math.max(12, Math.floor(1_500_000 / maskCount)));
-    for (let idx = 0; idx < layerOrder.length; idx++) {
-      const li = layerOrder[idx];
-      if (filled[li]) continue;
+  const priority = new Float32Array(rw * rh);
+  const isFront = new Uint8Array(rw * rh);
+  let front = [];
+  const computePriority = (i) => {
+    const x = i % rw, y = (i - x) / rw;
+    let c = 0, n = 0;
+    for (let oy = -P; oy <= P; oy++) {
+      const yy = y + oy;
+      if (yy < 0 || yy >= rh) continue;
+      for (let ox = -P; ox <= P; ox++) {
+        const xx = x + ox;
+        if (xx < 0 || xx >= rw) continue;
+        const j = yy * rw + xx;
+        if (dist[j] < 0) continue;
+        n++;
+        if (filled[j]) c += conf[j];
+      }
+    }
+    const C = n ? c / n : 0;
+    conf[i] = C;
+    priority[i] = C * (dataTerm(buf, filled, rw, rh, x, y) + 0.001);
+  };
+  const updateFront = (i) => {
+    if (!unknown(i)) {
+      isFront[i] = 0;
+      return;
+    }
+    const x = i % rw, y = (i - x) / rw;
+    const edge = (x > 0 && filled[i - 1]) || (x < rw - 1 && filled[i + 1])
+      || (y > 0 && filled[i - rw]) || (y < rh - 1 && filled[i + rw]);
+    if (edge) {
+      if (!isFront[i]) front.push(i);
+      isFront[i] = 1;
+      computePriority(i);
+    } else {
+      isFront[i] = 0;
+    }
+  };
+  for (let i = 0; i < rw * rh; i++) if (unknown(i)) updateFront(i);
 
-      const px = li % rw;
-      const py = (li - px) / rw;
+  // Search locally first (nearby texture matches best), widening if needed.
+  const baseWindow = Math.max(24, Math.min(72, Math.round(Math.sqrt(maskCount) * 0.9)));
+  const step = maskCount > 30000 ? 2 : 1;
+  let remaining = 0;
+  for (let i = 0; i < rw * rh; i++) if (unknown(i)) remaining++;
+  let iterations = 0;
 
-      // Collect nearby known pixels inside 7x7 around (px, py) for SSD comparison
-      const offsets = [];
-      for (let oy = -patchR; oy <= patchR; oy++) {
-        const ny = py + oy;
-        if (ny < 0 || ny >= rh) continue;
-        for (let ox = -patchR; ox <= patchR; ox++) {
-          const nx = px + ox;
-          if (nx < 0 || nx >= rw) continue;
-          const nli = ny * rw + nx;
-          if (filled[nli]) {
-            offsets.push([ox, oy, nli * 3, origKnown[nli] ? 2 : 1]);
+  while (remaining > 0 && iterations++ < 200000) {
+    // Pick the highest-priority front pixel (compacting stale entries).
+    let best = -1, bestP = -1, w = 0;
+    for (let k = 0; k < front.length; k++) {
+      const i = front[k];
+      if (!isFront[i]) continue;
+      front[w++] = i;
+      if (priority[i] > bestP) {
+        bestP = priority[i];
+        best = i;
+      }
+    }
+    front.length = w;
+    if (best < 0) {
+      for (let i = 0; i < rw * rh; i++) if (unknown(i)) updateFront(i);
+      if (!front.length) break;
+      continue;
+    }
+    const px = best % rw, py = (best - px) / rw;
+
+    // Known pixels of the target patch drive the match.
+    const offs = [];
+    for (let oy = -P; oy <= P; oy++) {
+      const ty = py + oy;
+      if (ty < 0 || ty >= rh) continue;
+      for (let ox = -P; ox <= P; ox++) {
+        const tx = px + ox;
+        if (tx < 0 || tx >= rw) continue;
+        const t = ty * rw + tx;
+        if (filled[t] && dist[t] >= 0) offs.push(ox, oy, t * 3, origKnown[t] ? 1.6 : 1);
+      }
+    }
+
+    let bx = -1, by = -1, bestErr = Infinity;
+    for (let win = baseWindow; bx < 0; win *= 2) {
+      const x0 = Math.max(P, px - win), x1 = Math.min(rw - P - 1, px + win);
+      const y0 = Math.max(P, py - win), y1 = Math.min(rh - P - 1, py + win);
+      for (let cy = y0; cy <= y1; cy += step) {
+        for (let cx = x0; cx <= x1; cx += step) {
+          if (!validSrc[cy * rw + cx]) continue;
+          let err = 0;
+          for (let k = 0; k < offs.length; k += 4) {
+            const s = ((cy + offs[k + 1]) * rw + cx + offs[k]) * 3;
+            const t = offs[k + 2];
+            const dr = buf[s] - buf[t], dg = buf[s + 1] - buf[t + 1], db = buf[s + 2] - buf[t + 2];
+            err += offs[k + 3] * (dr * dr + dg * dg + db * db);
+            if (err >= bestErr) break;
+          }
+          // Mild preference for nearby sources keeps texture scale and lighting local.
+          err += ((cx - px) * (cx - px) + (cy - py) * (cy - py)) * 0.02 * offs.length;
+          if (err < bestErr) {
+            bestErr = err;
+            bx = cx;
+            by = cy;
           }
         }
       }
+      if (win > Math.max(rw, rh)) break;
+    }
+    if (bx < 0) {
+      fillByDiffusion(buf, filled, dist, rw, rh);
+      return;
+    }
+    // Refine around the coarse match when searching with a stride.
+    if (step > 1) {
+      for (let cy = by - 1; cy <= by + 1; cy++) {
+        for (let cx = bx - 1; cx <= bx + 1; cx++) {
+          if (cy < P || cx < P || cy >= rh - P || cx >= rw - P || !validSrc[cy * rw + cx]) continue;
+          let err = 0;
+          for (let k = 0; k < offs.length; k += 4) {
+            const s = ((cy + offs[k + 1]) * rw + cx + offs[k]) * 3;
+            const t = offs[k + 2];
+            const dr = buf[s] - buf[t], dg = buf[s + 1] - buf[t + 1], db = buf[s + 2] - buf[t + 2];
+            err += offs[k + 3] * (dr * dr + dg * dg + db * db);
+          }
+          err += ((cx - px) * (cx - px) + (cy - py) * (cy - py)) * 0.02 * offs.length;
+          if (err < bestErr) {
+            bestErr = err;
+            bx = cx;
+            by = cy;
+          }
+        }
+      }
+    }
 
-      if (offsets.length === 0) {
-        filled[li] = 1;
+    // Copy the source patch into the unknown pixels of the target patch.
+    const c = conf[best];
+    for (let oy = -P; oy <= P; oy++) {
+      const ty = py + oy;
+      if (ty < 0 || ty >= rh) continue;
+      for (let ox = -P; ox <= P; ox++) {
+        const tx = px + ox;
+        if (tx < 0 || tx >= rw) continue;
+        const t = ty * rw + tx;
+        if (!unknown(t)) continue;
+        const sPix = (by + oy) * rw + bx + ox;
+        const sIdx = sPix * 3;
+        srcMap[t] = sPix;
+        buf[t * 3] = buf[sIdx];
+        buf[t * 3 + 1] = buf[sIdx + 1];
+        buf[t * 3 + 2] = buf[sIdx + 2];
+        filled[t] = 1;
+        conf[t] = c;
+        isFront[t] = 0;
+        remaining--;
+      }
+    }
+    // Refresh front membership and priorities around the patch.
+    const R = 2 * P + 1;
+    for (let yy = Math.max(0, py - R); yy <= Math.min(rh - 1, py + R); yy++) {
+      for (let xx = Math.max(0, px - R); xx <= Math.min(rw - 1, px + R); xx++) {
+        const i = yy * rw + xx;
+        if (unknown(i)) updateFront(i);
+      }
+    }
+  }
+  if (remaining > 0) fillByDiffusion(buf, filled, dist, rw, rh);
+}
+
+/**
+ * Gradient-domain clean-up: keeps the texture (gradients) of each copied patch
+ * but removes brightness steps where neighbouring patches came from different
+ * places, and where the fill meets the surrounding pixels.
+ */
+function poissonBlend(buf, origKnown, srcMap, dist, order, rw, rh) {
+  const n = order.length;
+  if (!n) return;
+  const DIRS = [1, -1, rw, -rw];
+  // Guidance gradient for each (pixel, direction): the same step at the patch source.
+  const guide = new Float32Array(n * 4 * 3);
+  const neighbor = new Int32Array(n * 4).fill(-1);
+  for (let k = 0; k < n; k++) {
+    const p = order[k];
+    const x = p % rw;
+    const s = srcMap[p];
+    for (let d = 0; d < 4; d++) {
+      const q = p + DIRS[d];
+      if ((d === 0 && x === rw - 1) || (d === 1 && x === 0) || q < 0 || q >= rw * rh || dist[q] < 0) continue;
+      // Across a patch seam (or onto the surrounding pixels), only even out small
+      // tone steps; a large jump there is a contour and must stay sharp.
+      const inPatch = s >= 0 && srcMap[q] === s + DIRS[d];
+      if (!inPatch) {
+        // Similar colours meeting at a seam should join without a step (zero gradient).
+        if (colorDistance(buf, p * 3, q * 3) <= 24) neighbor[k * 4 + d] = q;
         continue;
       }
-
-      // Filter candidates to a reasonable local radius first
-      let bestX = -1;
-      let bestY = -1;
-      let bestErr = Infinity;
-      const searchR2 = pad * pad;
-      let checked = 0;
-
-      // Deterministic pseudo-random start offset so texture doesn't repeat in stripes
-      const start = (idx * 2654435761) >>> 0;
-      const totalC = candidates.length;
-      const stride = totalC > maxLocalCand ? Math.floor(totalC / maxLocalCand) : 1;
-
-      for (let c = 0; c < totalC && checked < maxLocalCand; c += stride) {
-        const cand = candidates[(start + c) % totalC];
-        const ddx = cand.x - px;
-        const ddy = cand.y - py;
-        if (ddx * ddx + ddy * ddy > searchR2 && checked > 15) continue;
-        checked++;
-        let error = 0;
-        for (const [ox, oy, target, weight] of offsets) {
-          const source = ((cand.y + oy) * rw + cand.x + ox) * 3;
-          const dr = buf[source] - buf[target];
-          const dg = buf[source + 1] - buf[target + 1];
-          const db = buf[source + 2] - buf[target + 2];
-          error += weight * (dr * dr + dg * dg + db * db);
-          if (error >= bestErr) break;
-        }
-        if (error < bestErr) {
-          bestErr = error;
-          bestX = cand.x;
-          bestY = cand.y;
-        }
+      // Inside a patch, keep the source's own gradient (its texture).
+      const sq = s + DIRS[d];
+      neighbor[k * 4 + d] = q;
+      for (let c = 0; c < 3; c++) guide[(k * 4 + d) * 3 + c] = buf[s * 3 + c] - buf[sq * 3 + c];
+    }
+  }
+  const before = new Float32Array(n * 3);
+  for (let k = 0; k < n; k++) for (let c = 0; c < 3; c++) before[k * 3 + c] = buf[order[k] * 3 + c];
+  const iterations = Math.min(600, 60 + Math.round(Math.sqrt(n) * 2));
+  const omega = 1.85;
+  for (let it = 0; it < iterations; it++) {
+    for (let k = 0; k < n; k++) {
+      const p = order[k];
+      let cnt = 0, r = 0, g = 0, b = 0;
+      for (let d = 0; d < 4; d++) {
+        const q = neighbor[k * 4 + d];
+        if (q < 0) continue;
+        const gi = (k * 4 + d) * 3;
+        r += buf[q * 3] + guide[gi];
+        g += buf[q * 3 + 1] + guide[gi + 1];
+        b += buf[q * 3 + 2] + guide[gi + 2];
+        cnt++;
       }
+      if (!cnt) continue;
+      buf[p * 3] += omega * (r / cnt - buf[p * 3]);
+      buf[p * 3 + 1] += omega * (g / cnt - buf[p * 3 + 1]);
+      buf[p * 3 + 2] += omega * (b / cnt - buf[p * 3 + 2]);
+    }
+  }
+  // Keep only the low-frequency part of the correction: it evens out tone
+  // steps between patches without smearing structure the patches got right.
+  const corr = new Float32Array(rw * rh * 3);
+  const inside = new Uint8Array(rw * rh);
+  for (let k = 0; k < n; k++) {
+    const p = order[k];
+    inside[p] = 1;
+    for (let c = 0; c < 3; c++) corr[p * 3 + c] = buf[p * 3 + c] - before[k * 3 + c];
+  }
+  const smooth = blurMasked(corr, inside, rw, rh, 6);
+  for (let k = 0; k < n; k++) {
+    const p = order[k];
+    for (let c = 0; c < 3; c++) buf[p * 3 + c] = clamp(before[k * 3 + c] + smooth[p * 3 + c]);
+  }
+}
 
-      // Fallback to any candidate if local search missed
-      if (bestX === -1) {
-        const cand = candidates[start % totalC];
-        bestX = cand.x;
-        bestY = cand.y;
+/** Box blur of a 3-channel field over `inside` pixels only (normalised by coverage). */
+function blurMasked(field, inside, rw, rh, radius) {
+  const tmp = new Float32Array(field.length);
+  const tmpW = new Float32Array(rw * rh);
+  const out = new Float32Array(field.length);
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      let r = 0, g = 0, b = 0, w = 0;
+      for (let k = Math.max(0, x - radius); k <= Math.min(rw - 1, x + radius); k++) {
+        const j = y * rw + k;
+        if (!inside[j]) continue;
+        r += field[j * 3];
+        g += field[j * 3 + 1];
+        b += field[j * 3 + 2];
+        w++;
       }
-
-      // Stamp patch block into unfilled pixels
-      for (let oy = -stampR; oy <= stampR; oy++) {
-        const ty = py + oy;
-        const sy = bestY + oy;
-        if (ty < 0 || ty >= rh || sy < 0 || sy >= rh) continue;
-        for (let ox = -stampR; ox <= stampR; ox++) {
-          const tx = px + ox;
-          const sx = bestX + ox;
-          if (tx < 0 || tx >= rw || sx < 0 || sx >= rw) continue;
-          const tli = ty * rw + tx;
-          if (dist[tli] <= 0) continue;
-          const sIdx = (sy * rw + sx) * 3;
-          if (!filled[tli]) {
-            buf[tli * 3] = buf[sIdx];
-            buf[tli * 3 + 1] = buf[sIdx + 1];
-            buf[tli * 3 + 2] = buf[sIdx + 2];
-            filled[tli] = 1;
-          } else {
-            // Soft blend on overlap
-            buf[tli * 3] = buf[tli * 3] * 0.65 + buf[sIdx] * 0.35;
-            buf[tli * 3 + 1] = buf[tli * 3 + 1] * 0.65 + buf[sIdx + 1] * 0.35;
-            buf[tli * 3 + 2] = buf[tli * 3 + 2] * 0.65 + buf[sIdx + 2] * 0.35;
-          }
-        }
+      const i = y * rw + x;
+      tmp[i * 3] = r;
+      tmp[i * 3 + 1] = g;
+      tmp[i * 3 + 2] = b;
+      tmpW[i] = w;
+    }
+  }
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      const i = y * rw + x;
+      if (!inside[i]) continue;
+      let r = 0, g = 0, b = 0, w = 0;
+      for (let k = Math.max(0, y - radius); k <= Math.min(rh - 1, y + radius); k++) {
+        const j = k * rw + x;
+        r += tmp[j * 3];
+        g += tmp[j * 3 + 1];
+        b += tmp[j * 3 + 2];
+        w += tmpW[j];
+      }
+      if (w) {
+        out[i * 3] = r / w;
+        out[i * 3 + 1] = g / w;
+        out[i * 3 + 2] = b / w;
       }
     }
   }
+  return out;
+}
 
-  // 6. Smooth minor joins on the rim while preserving contrasting edges.
+/** Fallback: outer-to-inner averaging for pixels no patch could reach. */
+function fillByDiffusion(buf, filled, dist, rw, rh) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < rw * rh; i++) {
+      if (dist[i] <= 0 || filled[i]) continue;
+      const x = i % rw, y = (i - x) / rw;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + ox, ny = y + oy;
+        if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+        const j = ny * rw + nx;
+        if (!filled[j] || dist[j] < 0) continue;
+        r += buf[j * 3];
+        g += buf[j * 3 + 1];
+        b += buf[j * 3 + 2];
+        n++;
+      }
+      if (n) {
+        buf[i * 3] = r / n;
+        buf[i * 3 + 1] = g / n;
+        buf[i * 3 + 2] = b / n;
+        filled[i] = 1;
+        changed = true;
+      }
+    }
+  }
+}
+
+function smoothRim(buf, dist, layerOrder, rw, rh) {
   let rimLength = 0;
   while (rimLength < layerOrder.length && dist[layerOrder[rimLength]] <= 2) rimLength++;
   const rim = new Float32Array(rimLength * 3);
@@ -459,17 +696,45 @@ export function inpaintMaskedRegion(imageData, mask) {
     buf[li * 3 + 1] = rim[idx * 3 + 1];
     buf[li * 3 + 2] = rim[idx * 3 + 2];
   }
+}
 
-  writeInpaintedPixels(data, buf, layerOrder, width, rw, rx0, ry0);
-  return true;
+/** Per-channel median of visible pixels on a ring (radius r0..r1) around (cx, cy). */
+function ringMedian(data, width, height, cx, cy, r0, r1) {
+  const samples = [[], [], []];
+  const count = Math.min(96, Math.max(24, Math.round(2 * Math.PI * r1 / 2)));
+  for (const radius of [r0, (r0 + r1) / 2, r1]) {
+    for (let k = 0; k < count; k++) {
+      const a = (k * 2 * Math.PI) / count;
+      const x = Math.round(cx + Math.cos(a) * radius);
+      const y = Math.round(cy + Math.sin(a) * radius);
+      if (x < 0 || y < 0 || x >= width || y >= height) continue;
+      const i = (y * width + x) * 4;
+      if (data[i + 3] < 128) continue;
+      for (let c = 0; c < 3; c++) samples[c].push(data[i + c]);
+    }
+  }
+  if (samples[0].length < 8) return null;
+  return samples.map((values) => {
+    values.sort((a, b) => a - b);
+    return values[values.length >> 1];
+  });
 }
 
 /**
- * Clone Stamp brush: copies clean pixels from (srcX, srcY) offset to (cx, cy).
+ * Clone Stamp brush: copies pixels from (x + offsetX, y + offsetY) to (x, y).
+ * With `toneMatch`, the copy is shifted by the brightness/colour difference
+ * between the surroundings of the source and of the destination (healing
+ * clone), so a lighter or darker source does not leave a visible patch.
  */
-export function applyCloneStampStroke(imageData, cx, cy, offsetX, offsetY, radius, strength) {
+export function applyCloneStampStroke(imageData, cx, cy, offsetX, offsetY, radius, strength, toneMatch = false) {
   const { width, height, data } = imageData;
   const r = Math.max(4, Math.round(radius));
+  let tone = null;
+  if (toneMatch) {
+    const dst = ringMedian(data, width, height, cx, cy, r * 1.05, r * 1.4);
+    const src = ringMedian(data, width, height, cx + offsetX, cy + offsetY, r * 1.05, r * 1.4);
+    if (dst && src) tone = [dst[0] - src[0], dst[1] - src[1], dst[2] - src[2]];
+  }
   const r2 = r * r;
   const minX = Math.max(0, Math.floor(cx - r));
   const maxX = Math.min(width - 1, Math.ceil(cx + r));
@@ -508,9 +773,39 @@ export function applyCloneStampStroke(imageData, cx, cy, offsetX, offsetY, radiu
       const dstWeight = data[ti + 3] * (1 - falloff);
       const alpha = srcWeight + dstWeight;
       for (let c = 0; c < 3; c++) {
-        data[ti + c] = alpha ? (source[si + c] * srcWeight + data[ti + c] * dstWeight) / alpha : 0;
+        const sourceValue = tone ? clamp(source[si + c] + tone[c]) : source[si + c];
+        data[ti + c] = alpha ? (sourceValue * srcWeight + data[ti + c] * dstWeight) / alpha : 0;
       }
       data[ti + 3] = alpha;
     }
   }
+}
+
+/**
+ * Grows a brush mask by `radius` pixels so the soft, anti-aliased rim of the
+ * object being removed is included and does not leave a faint outline.
+ */
+export function dilateMask(mask, width, height, radius) {
+  if (radius <= 0) return mask;
+  const r2 = radius * radius;
+  const out = new Uint8Array(mask);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!mask[y * width + x]) continue;
+      // Only pixels on the mask edge can grow it.
+      const interior = x > 0 && y > 0 && x < width - 1 && y < height - 1
+        && mask[y * width + x - 1] && mask[y * width + x + 1] && mask[(y - 1) * width + x] && mask[(y + 1) * width + x];
+      if (interior) continue;
+      for (let oy = -radius; oy <= radius; oy++) {
+        const ny = y + oy;
+        if (ny < 0 || ny >= height) continue;
+        for (let ox = -radius; ox <= radius; ox++) {
+          const nx = x + ox;
+          if (nx < 0 || nx >= width || ox * ox + oy * oy > r2) continue;
+          out[ny * width + nx] = 1;
+        }
+      }
+    }
+  }
+  return out;
 }

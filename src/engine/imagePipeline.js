@@ -342,13 +342,19 @@ function hslToRgb(hDeg, s, l) {
 /**
  * Full pixel pipeline: Beauty + Color Adjustments + HSL Mixer + Clarity + Fade + Grain + Sharpen + Vignette.
  */
+/** Share of fine pore texture put back after skin smoothing (avoids a waxy look). */
+export const SKIN_TEXTURE_KEEP = 0.6;
+
 export function processImagePipeline(srcImageData, adjustments, beauty) {
   const { width, height, data: src } = srcImageData;
   const out = new Uint8ClampedArray(src.length);
 
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
   let blurred = null;
+  let fineBlur = null;
   if (beauty.skinSmooth > 0) {
+    // 3×3 average: src − fineBlur is the pore-level texture restored after smoothing.
+    fineBlur = boxBlurRGBA(src, width, height, 1);
     const blurRadius = Math.max(2, Math.round((Math.min(width, height) / 360) * (2 + beauty.skinSmooth * 0.06)));
     blurred = boxBlurRGBA(src, width, height, blurRadius);
   }
@@ -417,9 +423,10 @@ export function processImagePipeline(srcImageData, adjustments, beauty) {
             const diff = (Math.abs(r - br) + Math.abs(g - bg) + Math.abs(b - bb)) / 3;
             const edgeKeep = Math.exp(-(diff * diff) / 380);
             const blend = smoothStrength * skinW * edgeKeep * 0.85;
-            r = r + (br - r) * blend;
-            g = g + (bg - g) * blend;
-            b = b + (bb - b) * blend;
+            const keep = blend * SKIN_TEXTURE_KEEP;
+            r = r + (br - r) * blend + (src[i] - fineBlur[i]) * keep;
+            g = g + (bg - g) * blend + (src[i + 1] - fineBlur[i + 1]) * keep;
+            b = b + (bb - b) * blend + (src[i + 2] - fineBlur[i + 2]) * keep;
           }
           if (brightenAmount > 0) {
             const add = brightenAmount * skinW;
@@ -755,6 +762,26 @@ export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, s
     return [Math.cos(angle) * r * 0.95, Math.sin(angle) * r * 0.95];
   }) : null;
 
+  // Does a contour (crease, lip line, eyelid) cross this dab? Checked once on a
+  // dense ring so thin lines between the eight per-pixel samples are not missed.
+  let crossesContour = false;
+  if (healOffsets) {
+    const count = Math.min(64, Math.max(16, Math.round((2 * Math.PI * r) / 3)));
+    let lo = [255, 255, 255], hi = [0, 0, 0];
+    for (let k = 0; k < count; k++) {
+      const angle = (k * 2 * Math.PI) / count;
+      const sx = clamp(Math.round(cx + Math.cos(angle) * r * 0.95 - ox), 0, rw - 1);
+      const sy = clamp(Math.round(cy + Math.sin(angle) * r * 0.95 - oy), 0, rh - 1);
+      const si = (sy * rw + sx) * 4;
+      if (roi[si + 3] === 0) continue;
+      for (let c = 0; c < 3; c++) {
+        lo[c] = Math.min(lo[c], roi[si + c]);
+        hi[c] = Math.max(hi[c], roi[si + c]);
+      }
+    }
+    crossesContour = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) > 42;
+  }
+
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       const dx = x - cx;
@@ -806,12 +833,33 @@ export function applySkinBrushStroke(imageData, origImageData, cx, cy, radius, s
         }
 
         // A uniform ring can repair a blemish that differs from every sample.
-        // Where the ring crosses a contour, use only the destination's color group.
-        if (Math.max(maxRed - minRed, maxGreen - minGreen, maxBlue - minBlue) > 42) {
-          sr = matchRed;
-          sg = matchGreen;
-          sb = matchBlue;
-          weight = matchWeight;
+        // Where the ring crosses a contour (nostril, lip, eyelid), copying from the
+        // ring would paint the contour beside itself. Smooth in place instead,
+        // averaging only nearby pixels of the same colour so the contour stays put.
+        if (crossesContour || Math.max(maxRed - minRed, maxGreen - minGreen, maxBlue - minBlue) > 42) {
+          sr = 0;
+          sg = 0;
+          sb = 0;
+          weight = 0;
+          const reach = Math.max(2, Math.round(r * 0.3));
+          const stride = Math.max(1, Math.round(reach / 3));
+          for (let oyOff = -reach; oyOff <= reach; oyOff += stride) {
+            const sy = y + oyOff - oy;
+            if (sy < 0 || sy >= rh) continue;
+            for (let oxOff = -reach; oxOff <= reach; oxOff += stride) {
+              const sx = x + oxOff - ox;
+              if (sx < 0 || sx >= rw) continue;
+              const si = (sy * rw + sx) * 4;
+              const alpha = roi[si + 3];
+              if (alpha === 0) continue;
+              const diff = Math.max(Math.abs(roi[si] - currentRed), Math.abs(roi[si + 1] - currentGreen), Math.abs(roi[si + 2] - currentBlue));
+              const w = alpha * Math.exp(-(diff * diff) / 450);
+              sr += roi[si] * w;
+              sg += roi[si + 1] * w;
+              sb += roi[si + 2] * w;
+              weight += w;
+            }
+          }
         }
       } else {
         const cr = roi[li], cg = roi[li + 1], cb = roi[li + 2];

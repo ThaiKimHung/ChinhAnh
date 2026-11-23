@@ -13,7 +13,7 @@
 // the GPU's texture limits, or anything fails (the GPU path is then disabled
 // for the session).
 
-import { processImagePipeline } from './imagePipeline';
+import { SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline';
 
 const VERTEX = `#version 300 es
 void main() {
@@ -44,6 +44,8 @@ precision highp int;
 uniform sampler2D u_src;
 uniform sampler2D u_skinBlur;
 uniform sampler2D u_clarityBlur;
+uniform sampler2D u_fineBlur;
+uniform float u_textureKeep;
 uniform ivec2 u_size;
 uniform bool u_hasBeauty;
 uniform bool u_hasSkinBlur;
@@ -129,7 +131,8 @@ void main() {
         float diff = (dv.r + dv.g + dv.b) / 3.0;
         float edgeKeep = exp(-(diff * diff) / 380.0);
         float blend = u_smoothStrength * skinW * edgeKeep * 0.85;
-        c = c + (bl - c) * blend;
+        vec3 fine = srcPx.rgb * 255.0 - texelFetch(u_fineBlur, p, 0).rgb * 255.0;
+        c = c + (bl - c) * blend + fine * (blend * u_textureKeep);
       }
       if (u_brightenAmount > 0.0) {
         float add = u_brightenAmount * skinW;
@@ -326,12 +329,12 @@ function getEngine() {
   return engine ?? null;
 }
 
-/** Five same-size RGBA8 textures: source, two blur results, scratch, output. */
+/** Six same-size RGBA8 textures: source, three blur results, scratch, output. */
 function ensureTextures(e, width, height) {
   const { gl } = e;
   if (e.size && e.size.width === width && e.size.height === height) return;
   e.textures.forEach((t) => gl.deleteTexture(t));
-  e.textures = Array.from({ length: 5 }, () => {
+  e.textures = Array.from({ length: 6 }, () => {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -384,7 +387,7 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
   const { gl } = e;
 
   ensureTextures(e, width, height);
-  const [srcTex, skinTex, clarityTex, scratchTex, outTex] = e.textures;
+  const [srcTex, skinTex, clarityTex, scratchTex, outTex, fineTex] = e.textures;
   gl.bindVertexArray(e.vao);
   gl.viewport(0, 0, width, height);
   gl.bindTexture(gl.TEXTURE_2D, srcTex);
@@ -396,6 +399,7 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
   const hasSkinBlur = beauty.skinSmooth > 0;
   if (hasSkinBlur) {
     boxBlur(e, srcTex, scratchTex, skinTex, Math.max(2, Math.round((minSide / 360) * (2 + beauty.skinSmooth * 0.06))));
+    boxBlur(e, srcTex, scratchTex, fineTex, 1);
   }
   const clarity = adjustments.clarity || 0;
   if (clarity !== 0) {
@@ -408,13 +412,14 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
     e,
     e.main,
     mainTarget,
-    [['u_src', srcTex], ['u_skinBlur', skinTex], ['u_clarityBlur', clarityTex]],
+    [['u_src', srcTex], ['u_skinBlur', skinTex], ['u_clarityBlur', clarityTex], ['u_fineBlur', fineTex]],
     (g, u) => {
       g.uniform1i(u.u_hasBeauty, beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0 ? 1 : 0);
       g.uniform1i(u.u_hasSkinBlur, hasSkinBlur ? 1 : 0);
       g.uniform1i(u.u_hasClarity, clarity !== 0 ? 1 : 0);
       g.uniform1i(u.u_hasHsl, hasHslChanges(adjustments.hsl) ? 1 : 0);
       g.uniform1f(u.u_smoothStrength, beauty.skinSmooth / 100);
+      g.uniform1f(u.u_textureKeep, SKIN_TEXTURE_KEEP);
       g.uniform1f(u.u_brightenAmount, beauty.skinBrighten * 0.35);
       g.uniform1f(u.u_rosyAmount, beauty.skinRosy * 0.22);
       g.uniform1f(u.u_clarityAmount, clarity / 100);

@@ -34,7 +34,7 @@ import {
   computeHistogram,
   generateIdPhotoSheetCanvas,
 } from './engine/imagePipeline';
-import { applyCloneStampStroke } from './engine/inpaint';
+import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   canvasToBlob,
@@ -135,6 +135,7 @@ export default function App() {
   const [cloneSource, setCloneSource] = useState(null);
   const [pickingCloneSource, setPickingCloneSource] = useState(false);
   const cloneOffsetRef = useRef(null);
+  const [cloneToneMatch, setCloneToneMatch] = useState(true);
 
   // Background removal & refinement brush
   const [bgState, setBgState] = useState({ ...DEFAULT_BG_STATE });
@@ -727,7 +728,8 @@ export default function App() {
     setEraseProcessing(true);
     setEditorNotice('');
     try {
-      const pixels = await inpaintInWorker(source, mask, job.controller.signal);
+      const grow = Math.max(1, Math.round(Math.min(source.width, source.height) / 700));
+      const pixels = await inpaintInWorker(source, dilateMask(mask, source.width, source.height, grow), job.controller.signal);
       if (eraseJobRef.current !== job || !imageJobs.isCurrent(job.token)) return;
       if (!pixels) {
         setEditorNotice('Chưa đủ vùng nền để lấp chỗ đã tô. Hãy chừa nền xung quanh và thử vùng nhỏ hơn.');
@@ -761,7 +763,7 @@ export default function App() {
       applyLiquifyStroke(workData, origDataRef.current, fromX, fromY, x, y, brushSize, strength, liquifyMode);
     } else if (activeTab === 'erase' && eraseMode === 'clone' && cloneOffsetRef.current) {
       const { dx, dy } = cloneOffsetRef.current;
-      applyCloneStampStroke(workData, x, y, dx, dy, brushSize, strength);
+      applyCloneStampStroke(workData, x, y, dx, dy, brushSize, strength, cloneToneMatch);
     } else if (activeTab === 'background' && bgMaskBrush !== 'none' && cutoutAlphaRef.current) {
       const { width, height } = workData;
       applyAlphaMaskBrushStroke(cutoutAlphaRef.current, width, height, x, y, brushSize, strength, bgMaskBrush);
@@ -769,7 +771,7 @@ export default function App() {
       return false;
     }
     return true;
-  }, [activeTab, bgMaskBrush, brushSize, brushStrength, brushTool, eraseMode, liquifyMode]);
+  }, [activeTab, bgMaskBrush, brushSize, brushStrength, brushTool, cloneToneMatch, eraseMode, liquifyMode]);
 
   const updateBrushPreview = useCallback(() => {
     brushEditedRef.current = true;
@@ -1381,6 +1383,8 @@ export default function App() {
           cloneSource={cloneSource}
           pickingCloneSource={pickingCloneSource}
           setPickingCloneSource={setPickingCloneSource}
+          cloneToneMatch={cloneToneMatch}
+          setCloneToneMatch={setCloneToneMatch}
           bgState={bgState}
           setBgState={(value) => {
             markDraftDirty();

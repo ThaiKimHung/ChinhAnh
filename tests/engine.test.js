@@ -153,3 +153,52 @@ test('vibrance keeps near-black pixels neutral when earlier steps push channels 
   // A dark grey must stay dark and nearly neutral; it used to become pure yellow (255, 255, 0).
   assert.ok(Math.max(r, g, b) < 80 && Math.max(r, g, b) - Math.min(r, g, b) < 40, `got ${r},${g},${b}`);
 });
+
+test('healing across a dark crease does not copy the crease beside itself', () => {
+  const W = 40, H = 40;
+  const img = new ImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const crease = Math.abs(x - 20) <= 1;
+      img.data.set(crease ? [90, 55, 45, 255] : [214, 170, 150, 255], i);
+    }
+  }
+  const orig = new ImageData(new Uint8ClampedArray(img.data), W, H);
+  for (let x = 10; x <= 30; x += 2) applySkinBrushStroke(img, orig, x, 20, 8, 1, 'heal');
+  let worstSkin = 0;
+  for (let y = 14; y <= 26; y++) {
+    for (const x of [12, 14, 15, 16, 24, 25, 26, 28]) {
+      const i = (y * W + x) * 4;
+      worstSkin = Math.max(worstSkin, 214 - img.data[i]);
+    }
+  }
+  assert.ok(worstSkin <= 12, `skin beside the crease darkened by ${worstSkin}`);
+  assert.ok(img.data[(20 * W + 20) * 4] < 160, 'the crease itself is kept');
+});
+
+test('maximum skin smoothing keeps fine pore texture instead of a waxy flat surface', () => {
+  const W = 360, H = 360;
+  const img = new ImageData(W, H);
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  for (let p = 0; p < W * H; p++) {
+    const n = (rnd() - 0.5) * 24;
+    img.data.set([214 + n, 170 + n, 150 + n, 255], p * 4);
+  }
+  const out = processImagePipeline(img, DEFAULT_ADJUSTMENTS, { skinSmooth: 100, skinBrighten: 0, skinRosy: 0 });
+  const std = (d) => {
+    let s = 0, s2 = 0, n = 0;
+    for (let y = 20; y < H - 20; y++) {
+      for (let x = 20; x < W - 20; x++) {
+        const v = d[(y * W + x) * 4 + 1];
+        s += v;
+        s2 += v * v;
+        n++;
+      }
+    }
+    return Math.sqrt(s2 / n - (s / n) ** 2);
+  };
+  const kept = std(out.data) / std(img.data);
+  assert.ok(kept >= 0.5 && kept <= 0.8, `texture kept ${kept.toFixed(2)}`);
+});

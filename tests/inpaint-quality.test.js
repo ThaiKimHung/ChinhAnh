@@ -102,3 +102,26 @@ test('clone stamp blends sampled transparency without spreading invisible RGB', 
   const center = (12 * image.width + 14) * 4;
   assert.deepEqual([...image.data.subarray(center, center + 4)], [60, 120, 180, 128]);
 });
+
+test('mask dilation grows the brush mask by the requested radius only', async () => {
+  const { dilateMask } = await import('../src/engine/inpaint.js');
+  const mask = new Uint8Array(15 * 15);
+  mask[7 * 15 + 7] = 1;
+  const grown = dilateMask(mask, 15, 15, 2);
+  assert.equal(grown[7 * 15 + 9], 1);
+  assert.equal(grown[9 * 15 + 7], 1);
+  assert.equal(grown[7 * 15 + 10], 0);
+  assert.equal(grown[9 * 15 + 9], 0);
+  assert.equal(mask[7 * 15 + 9], 0, 'input is not modified');
+});
+
+test('clone stamp with tone matching adopts the brightness around the destination', () => {
+  const make = () => makeFixture(80, 40, (x) => (x < 40 ? [200, 200, 200, 255] : [150, 150, 150, 255]), () => false).image;
+  const centre = (img) => img.data[(20 * 80 + 60) * 4];
+  const plain = make();
+  applyCloneStampStroke(plain, 60, 20, -40, 0, 8, 1);
+  assert.ok(centre(plain) > 190, 'without tone matching the source brightness is copied');
+  const matched = make();
+  applyCloneStampStroke(matched, 60, 20, -40, 0, 8, 1, true);
+  assert.ok(Math.abs(centre(matched) - 150) <= 6, `tone-matched centre is ${centre(matched)}`);
+});

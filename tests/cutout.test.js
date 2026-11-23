@@ -67,3 +67,28 @@ test('feather softens the edge of a broad subject and leaves its opaque interior
   assert.ok(edge > 210 && edge < 255);
   assert.equal(image.data[(3 * 11 + 9) * 4 + 3], 255);
 });
+
+test('flyaway strands get their own colour and the background haze around them disappears', () => {
+  const W = 41, H = 21;
+  const bg = [120, 135, 150];
+  const hair = [30, 25, 20];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const matte = new Uint8ClampedArray(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const p = y * W + x;
+      let a = 0;
+      if (x === 20) a = 90; // thin strand, far from any solid foreground
+      else if (Math.abs(x - 20) <= 3) a = 40; // matte haze over plain background
+      const mix = x === 20 ? a / 255 : 0;
+      data.set([0, 1, 2].map((c) => hair[c] * mix + bg[c] * (1 - mix)).concat(255), p * 4);
+      matte[p] = a;
+    }
+  }
+  applyCutoutMatte({ width: W, height: H, data }, matte, { feather: 0 });
+  const strand = (10 * W + 20) * 4;
+  assert.ok([0, 1, 2].every((c) => Math.abs(data[strand + c] - hair[c]) <= 12), `strand ${[...data.slice(strand, strand + 3)]}`);
+  assert.ok(data[strand + 3] >= 80, 'strand keeps its opacity');
+  const haze = (10 * W + 22) * 4;
+  assert.ok(data[haze + 3] <= 8, `haze alpha ${data[haze + 3]}`);
+});
