@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Upload, Sparkles } from 'lucide-react';
 import { MAX_ZOOM, MIN_ZOOM, startPinch, updatePinch } from '../engine/pinch';
+import { normalizeRect } from '../engine/patch';
 
 const CROP_HANDLES = [
   { id: 'nw', cls: '-left-2 -top-2 cursor-nwse-resize' },
@@ -47,6 +48,11 @@ export default function CanvasStage({
   onOpenFile,
   onLoadSample,
   onViewportResize,
+  patchActive = false,
+  patchRect = null,
+  patchOffset = { dx: 0, dy: 0 },
+  patchFlip = false,
+  onPatchChange,
 }) {
   const stageRef = useRef(null);
   const viewCanvasRef = useRef(null);
@@ -64,6 +70,7 @@ export default function CanvasStage({
   const lastImgPosRef = useRef(null);
   const touchesRef = useRef(new Map());
   const pinchRef = useRef(null);
+  const patchDragRef = useRef(null);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -130,7 +137,37 @@ export default function CanvasStage({
       ctx.drawImage(eraseMaskCanvas, 0, 0);
       ctx.restore();
     }
-  }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion]);
+
+    // Cut & paste: preview the moved copy, then outline source (dashed) and target.
+    if (patchRect && !isComparingOriginal) {
+      const { x, y, w, h } = patchRect;
+      const tx = x + patchOffset.dx;
+      const ty = y + patchOffset.dy;
+      const moved = patchOffset.dx !== 0 || patchOffset.dy !== 0;
+      if (moved) {
+        ctx.save();
+        if (patchFlip) {
+          ctx.translate(tx * 2 + w, 0);
+          ctx.scale(-1, 1);
+        }
+        ctx.drawImage(displayCanvas, x, y, w, h, tx, ty, w, h);
+        ctx.restore();
+      }
+      const unit = 1 / Math.max(0.05, zoom);
+      ctx.save();
+      ctx.lineWidth = 1.5 * unit;
+      ctx.setLineDash([6 * unit, 4 * unit]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.strokeRect(x, y, w, h);
+      if (moved) {
+        ctx.setLineDash([]);
+        ctx.lineWidth = 2 * unit;
+        ctx.strokeStyle = '#f59e0b';
+        ctx.strokeRect(tx, ty, w, h);
+      }
+      ctx.restore();
+    }
+  }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion, patchRect, patchOffset, patchFlip, zoom]);
 
   const clientToImageCoords = useCallback((clientX, clientY) => {
     const canvas = viewCanvasRef.current;
@@ -204,6 +241,19 @@ export default function CanvasStage({
       if (pt) onPickCloneSource(pt.x, pt.y);
       return;
     }
+    if (patchActive && e.button === 0 && !spaceDown && onPatchChange) {
+      const pt = clientToImageCoords(e.clientX, e.clientY);
+      if (!pt) return;
+      const r = patchRect;
+      const inside = r
+        && pt.x >= r.x + patchOffset.dx && pt.x <= r.x + patchOffset.dx + r.w
+        && pt.y >= r.y + patchOffset.dy && pt.y <= r.y + patchOffset.dy + r.h;
+      patchDragRef.current = inside
+        ? { type: 'move', start: pt, offset: patchOffset, rect: r }
+        : { type: 'select', start: pt };
+      if (!inside) onPatchChange(null);
+      return;
+    }
     if (e.button === 1 || spaceDown || (!isBrushActive && !cropActive && e.button === 0)) {
       setIsPanning(true);
       lastPanRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
@@ -231,6 +281,25 @@ export default function CanvasStage({
       return;
     }
     if (!e.isPrimary) return;
+    const patchDrag = patchDragRef.current;
+    if (patchDrag && imageSize) {
+      const pt = clientToImageCoords(e.clientX, e.clientY);
+      if (!pt) return;
+      if (patchDrag.type === 'select') {
+        const rect = normalizeRect(
+          { x: patchDrag.start.x, y: patchDrag.start.y, w: pt.x - patchDrag.start.x, h: pt.y - patchDrag.start.y },
+          imageSize.width,
+          imageSize.height,
+        );
+        onPatchChange(rect, { dx: 0, dy: 0 });
+      } else {
+        onPatchChange(patchDrag.rect, {
+          dx: Math.round(patchDrag.offset.dx + pt.x - patchDrag.start.x),
+          dy: Math.round(patchDrag.offset.dy + pt.y - patchDrag.start.y),
+        });
+      }
+      return;
+    }
     if (draggingSplit && viewCanvasRef.current) {
       const rect = viewCanvasRef.current.getBoundingClientRect();
       const pct = Math.min(98, Math.max(2, ((e.clientX - rect.left) / rect.width) * 100));
@@ -345,6 +414,7 @@ export default function CanvasStage({
   const handlePointerUp = (e) => {
     if (releaseTouch(e)) return;
     if (!e.isPrimary) return;
+    patchDragRef.current = null;
     setDraggingSplit(false);
     setCropDrag(null);
     setIsPanning(false);
@@ -391,7 +461,7 @@ export default function CanvasStage({
       className={`min-h-0 flex-1 relative overflow-hidden bg-[#0c0e13] flex items-center justify-center ${hasImage ? 'touch-none' : ''} ${
         spaceDown || isPanning
           ? 'cursor-grab active:cursor-grabbing'
-          : pickingCloneSource
+          : pickingCloneSource || patchActive
           ? 'cursor-crosshair'
           : isBrushActive
           ? 'cursor-none'

@@ -35,6 +35,7 @@ import {
   generateIdPhotoSheetCanvas,
 } from './engine/imagePipeline';
 import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
+import { pastePatch } from './engine/patch';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   canvasToBlob,
@@ -58,6 +59,8 @@ import {
   useDraftRestore,
   useDraftState,
 } from './hooks/useDraftPersistence';
+
+const NO_OFFSET = { dx: 0, dy: 0 };
 
 export default function App() {
   const fileInputRef = useRef(null);
@@ -136,6 +139,11 @@ export default function App() {
   const [pickingCloneSource, setPickingCloneSource] = useState(false);
   const cloneOffsetRef = useRef(null);
   const [cloneToneMatch, setCloneToneMatch] = useState(true);
+
+  // Cut & paste (patch) tool: a rectangle of the photo moved over another spot
+  const [patchSelection, setPatchSelection] = useState(null); // { key, rect, offset, flip }
+  const [patchFeather, setPatchFeather] = useState(16);
+  const [patchToneMatch, setPatchToneMatch] = useState(true);
 
   // Background removal & refinement brush
   const [bgState, setBgState] = useState({ ...DEFAULT_BG_STATE });
@@ -656,11 +664,53 @@ export default function App() {
   });
 
   // Brush / Liquify / Erase / Background Mask strokes
+  const patchActive = activeTab === 'erase' && eraseMode === 'patch';
+  // A selection only belongs to the photo, size and tool it was made with.
+  const patchKey = patchActive && imageSize ? `${activeImageId}:${imageSize.width}x${imageSize.height}` : null;
+  const livePatch = patchKey && patchSelection?.key === patchKey ? patchSelection : null;
+  const patchRect = livePatch?.rect ?? null;
+  const patchOffset = livePatch?.offset ?? NO_OFFSET;
+  const patchFlip = livePatch?.flip ?? false;
   const isBrushActive =
     (activeTab === 'portrait' && brushTool !== 'none') ||
     activeTab === 'liquify' ||
-    activeTab === 'erase' ||
+    (activeTab === 'erase' && !patchActive) ||
     (activeTab === 'background' && hasCutoutMask && bgState.mode !== 'original' && bgMaskBrush !== 'none');
+
+  const cancelPatch = useCallback(() => setPatchSelection(null), []);
+  const setPatchFlip = (update) =>
+    setPatchSelection((p) => (p ? { ...p, flip: typeof update === 'function' ? update(p.flip) : update } : p));
+
+  const handleApplyPatch = useCallback(() => {
+    const workData = workDataRef.current;
+    if (!workData || !patchRect || (patchOffset.dx === 0 && patchOffset.dy === 0)) return;
+    cancelEraseJob();
+    const changed = pastePatch(workData, patchRect, patchOffset.dx, patchOffset.dy, {
+      feather: patchFeather,
+      toneMatch: patchToneMatch,
+      flip: patchFlip,
+    });
+    cancelPatch();
+    if (!changed) return;
+    imageJobs.invalidate();
+    pushSnapshot(true);
+    setRenderTick((t) => t + 1);
+  }, [cancelEraseJob, cancelPatch, imageJobs, patchFeather, patchFlip, patchOffset, patchRect, patchToneMatch, pushSnapshot]);
+
+  useEffect(() => {
+    if (!patchActive || !patchRect) return;
+    const onKey = (e) => {
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, dialog[open]')) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleApplyPatch();
+      } else if (e.key === 'Escape') {
+        cancelPatch();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cancelPatch, handleApplyPatch, patchActive, patchRect]);
 
   const paintEraseMaskSegment = useCallback(
     (x0, y0, x1, y1) => {
@@ -1261,6 +1311,13 @@ export default function App() {
             onStrokeMove={handleStrokeMove}
             onStrokeEnd={handleStrokeEnd}
             eraseMaskCanvas={activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvasState : null}
+            patchActive={patchActive}
+            patchRect={patchRect}
+            patchOffset={patchOffset}
+            patchFlip={patchFlip}
+            onPatchChange={(rect, offset) =>
+              setPatchSelection(rect ? { key: patchKey, rect, offset, flip: livePatch?.flip ?? false } : null)
+            }
             eraseMaskVersion={eraseMaskVersion}
             cloneSource={activeTab === 'erase' && eraseMode === 'clone' ? cloneSource : null}
             pickingCloneSource={activeTab === 'erase' && eraseMode === 'clone' && pickingCloneSource}
@@ -1385,6 +1442,16 @@ export default function App() {
           setPickingCloneSource={setPickingCloneSource}
           cloneToneMatch={cloneToneMatch}
           setCloneToneMatch={setCloneToneMatch}
+          patchRect={patchRect}
+          patchOffset={patchOffset}
+          patchFeather={patchFeather}
+          setPatchFeather={setPatchFeather}
+          patchToneMatch={patchToneMatch}
+          setPatchToneMatch={setPatchToneMatch}
+          patchFlip={patchFlip}
+          setPatchFlip={setPatchFlip}
+          onApplyPatch={handleApplyPatch}
+          onCancelPatch={cancelPatch}
           bgState={bgState}
           setBgState={(value) => {
             markDraftDirty();

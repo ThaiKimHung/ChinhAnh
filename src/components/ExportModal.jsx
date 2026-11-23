@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { X, Download, Check, Copy, Grid, Images, FileImage } from 'lucide-react';
 import { generateIdPhotoSheetCanvas } from '../engine/imagePipeline';
-import { downloadBlob, encodeCanvas } from '../engine/exportImage';
+import { downloadBlob, encodeCanvas, isSupportedCanvasSize } from '../engine/exportImage';
 
 const FORMAT_OPTIONS = [
   { value: 'image/jpeg', label: 'JPG', description: 'Nền trắng, phổ biến' },
@@ -63,7 +63,7 @@ export default function ExportModal({
   const [format, setFormat] = useState('image/jpeg');
   const [quality, setQuality] = useState(92);
   const [scale, setScale] = useState(1);
-  const [resolutionChoice, setResolutionChoice] = useState('working');
+  const [resolutionChoice, setResolutionChoice] = useState('auto');
   const [fileName, setFileName] = useState(null);
   const [archiveName, setArchiveName] = useState(null);
   const [estimate, setEstimate] = useState(null);
@@ -75,7 +75,9 @@ export default function ExportModal({
   const exportMode = mode === 'batch' && (imageCount < 2 || !onExportBatch) ? 'single' : mode;
   const isBatch = exportMode === 'batch';
   const isSheet = exportMode === 'id-sheet';
-  const resolution = fullResolutionSize ? resolutionChoice : 'working';
+  // Default to full resolution whenever the browser can handle the original size.
+  const autoResolution = fullResolutionSize && isSupportedCanvasSize(fullResolutionSize) ? 'original' : 'working';
+  const resolution = !fullResolutionSize ? 'working' : resolutionChoice === 'auto' ? autoResolution : resolutionChoice;
   const baseSize = resolution === 'original' ? fullResolutionSize : imageSize;
   const outputDimensions = isSheet ? formatDimensions(PRINT_SIZE) : formatDimensions(baseSize, scale);
   const estimateKey = [exportMode, sheetGrid, format, quality, scale, outputDimensions].join('/');
