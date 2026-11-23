@@ -35,6 +35,7 @@ import {
   generateIdPhotoSheetCanvas,
 } from './engine/imagePipeline';
 import { applyCloneStampStroke } from './engine/inpaint';
+import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   canvasToBlob,
   cloneImageData,
@@ -472,9 +473,19 @@ export default function App() {
   );
 
   const handleFilesSelected = useCallback(
-    (fileList) => {
-      const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
-      if (!files.length || !draftReadyRef.current) return;
+    async (fileList) => {
+      const picked = Array.from(fileList).filter(isImageFile);
+      if (!picked.length || !draftReadyRef.current) return;
+      if (picked.some(isHeicFile)) setImageLoadStatus('Đang chuyển ảnh HEIC…');
+      const results = await Promise.allSettled(picked.map((f) => toEditableImageFile(f)));
+      const files = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+      if (files.length < picked.length) {
+        setEditorNotice('Không đọc được một số ảnh HEIC. Hãy xuất ảnh sang JPG trên điện thoại rồi thử lại.');
+      }
+      if (!files.length) {
+        setImageLoadStatus('');
+        return;
+      }
       markDraftDirty();
       saveCurrentSession(imageJobs.activeId);
 
@@ -531,6 +542,24 @@ export default function App() {
     showImage,
     sampleUrl: samplePortraitUrl,
   });
+
+  // Files opened with the installed app ("Open with…" / file handlers).
+  const launchFilesRef = useRef([]);
+  useEffect(() => {
+    if (!('launchQueue' in window)) return;
+    window.launchQueue.setConsumer(async ({ files }) => {
+      if (!files?.length) return;
+      launchFilesRef.current.push(...(await Promise.all(files.map((handle) => handle.getFile()))));
+      if (draftReadyRef.current) {
+        const pending = launchFilesRef.current.splice(0);
+        void handleFilesSelected(pending);
+      }
+    });
+  }, [draftReadyRef, handleFilesSelected]);
+  useEffect(() => {
+    if (draft.status === 'loading' || !launchFilesRef.current.length) return;
+    void handleFilesSelected(launchFilesRef.current.splice(0));
+  }, [draft.status, handleFilesSelected]);
 
   useDraftAutosave({
     draft,
@@ -1094,11 +1123,13 @@ export default function App() {
     }
   };
 
-  const loadOverlayImage = async (file, kind) => {
-    if (!file || !workDataRef.current) return;
+  const loadOverlayImage = async (pickedFile, kind) => {
+    if (!pickedFile || !workDataRef.current) return;
     const job = imageJobs.start();
-    const url = URL.createObjectURL(file);
+    let url;
     try {
+      const file = await toEditableImageFile(pickedFile);
+      url = URL.createObjectURL(file);
       const image = await readImage(url);
       if (!imageJobs.isCurrent(job)) return;
       if (kind === 'background') {
@@ -1125,7 +1156,7 @@ export default function App() {
     } catch {
       if (imageJobs.isCurrent(job)) setEditorNotice('Không đọc được ảnh đã chọn. Hãy thử một tệp khác.');
     } finally {
-      URL.revokeObjectURL(url);
+      if (url) URL.revokeObjectURL(url);
     }
   };
 
@@ -1136,7 +1167,7 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept={IMAGE_FILE_ACCEPT}
         multiple
         className="hidden"
         onChange={(e) => {
@@ -1147,7 +1178,7 @@ export default function App() {
       <input
         ref={bgFileInputRef}
         type="file"
-        accept="image/*"
+        accept={IMAGE_FILE_ACCEPT}
         className="hidden"
         onChange={(e) => {
           void loadOverlayImage(e.target.files?.[0], 'background');
@@ -1157,7 +1188,7 @@ export default function App() {
       <input
         ref={logoFileInputRef}
         type="file"
-        accept="image/*"
+        accept={IMAGE_FILE_ACCEPT}
         className="hidden"
         onChange={(e) => {
           void loadOverlayImage(e.target.files?.[0], 'logo');
@@ -1260,7 +1291,7 @@ export default function App() {
           {(imageLoadStatus || editorNotice) && (
             <div className="pointer-events-none absolute z-30 inset-x-3 top-3 flex justify-center">
               <p
-                role={imageLoadStatus === 'Đang mở ảnh…' ? 'status' : 'alert'}
+                role={imageLoadStatus.startsWith('Đang') ? 'status' : 'alert'}
                 className="max-w-md rounded-lg border border-amber-400/40 bg-[#1d2029] px-3 py-2 text-center text-sm text-amber-100 shadow-lg"
               >
                 {imageLoadStatus || editorNotice}

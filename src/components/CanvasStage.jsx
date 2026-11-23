@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Upload, Sparkles } from 'lucide-react';
+import { MAX_ZOOM, MIN_ZOOM, startPinch, updatePinch } from '../engine/pinch';
 
 const CROP_HANDLES = [
   { id: 'nw', cls: '-left-2 -top-2 cursor-nwse-resize' },
@@ -61,6 +62,8 @@ export default function CanvasStage({
   const [dragOver, setDragOver] = useState(false);
   const lastPanRef = useRef({ x: 0, y: 0 });
   const lastImgPosRef = useRef(null);
+  const touchesRef = useRef(new Map());
+  const pinchRef = useRef(null);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -142,7 +145,7 @@ export default function CanvasStage({
     if (!hasImage) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    const nextZoom = Math.min(4, Math.max(0.15, Number((zoom * factor).toFixed(3))));
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((zoom * factor).toFixed(3))));
     if (nextZoom === zoom) return;
 
     const stageRect = stageRef.current?.getBoundingClientRect();
@@ -158,7 +161,43 @@ export default function CanvasStage({
     setZoom(nextZoom);
   };
 
+  const stagePoint = (e) => {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: e.clientX - (rect.left + rect.width / 2), y: e.clientY - (rect.top + rect.height / 2) };
+  };
+
+  // Two-finger touch: pinch to zoom, drag to pan. Any stroke started by the first
+  // finger is finished so the gesture never paints.
+  const trackTouch = (e) => {
+    if (e.pointerType !== 'touch' || !hasImage) return false;
+    const touches = touchesRef.current;
+    touches.set(e.pointerId, stagePoint(e));
+    if (touches.size !== 2 || pinchRef.current) return touches.size >= 2;
+    if (isDrawing) {
+      setIsDrawing(false);
+      lastImgPosRef.current = null;
+      onStrokeEnd?.();
+    }
+    setIsPanning(false);
+    setCropDrag(null);
+    setDraggingText(false);
+    setCursorPos(null);
+    const [a, b] = [...touches.values()];
+    pinchRef.current = startPinch(a, b, zoom, pan);
+    return true;
+  };
+
+  const releaseTouch = (e) => {
+    if (e.pointerType !== 'touch') return false;
+    touchesRef.current.delete(e.pointerId);
+    if (!pinchRef.current) return false;
+    if (touchesRef.current.size === 0) pinchRef.current = null;
+    return true;
+  };
+
   const handlePointerDown = (e) => {
+    if (trackTouch(e)) return;
     if (!hasImage || !e.isPrimary) return;
     if ((e.altKey || pickingCloneSource) && onPickCloneSource && e.button === 0) {
       const pt = clientToImageCoords(e.clientX, e.clientY);
@@ -181,6 +220,16 @@ export default function CanvasStage({
   };
 
   const handlePointerMove = (e) => {
+    if (pinchRef.current && e.pointerType === 'touch') {
+      touchesRef.current.set(e.pointerId, stagePoint(e));
+      const points = [...touchesRef.current.values()];
+      if (points.length >= 2) {
+        const next = updatePinch(pinchRef.current, points[0], points[1]);
+        setZoom(next.zoom);
+        setPan(next.pan);
+      }
+      return;
+    }
     if (!e.isPrimary) return;
     if (draggingSplit && viewCanvasRef.current) {
       const rect = viewCanvasRef.current.getBoundingClientRect();
@@ -294,6 +343,7 @@ export default function CanvasStage({
   };
 
   const handlePointerUp = (e) => {
+    if (releaseTouch(e)) return;
     if (!e.isPrimary) return;
     setDraggingSplit(false);
     setCropDrag(null);
