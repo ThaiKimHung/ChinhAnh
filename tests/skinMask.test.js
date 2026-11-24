@@ -119,3 +119,15 @@ test('an override painted on the working copy also applies at a larger export si
   const edited = applySkinOverride(big, small);
   assert.ok(sampleSkinMask(edited, 315, 135) > 0.9);
 });
+
+test('with a detected face the skin tone comes from the face, even when warmer areas dominate', async () => {
+  const { computeSkinMask: compute } = await import('../src/engine/skinMask.js');
+  // A small face high in the frame and a large warm-beige backdrop that wins without a face.
+  const face = [205, 146, 128];
+  const backdrop = [200, 165, 150]; // beige wall, Cr ≈ 147 vs 159 on the face
+  const img = paint(160, 120, (x, y) => ((x - 30) ** 2 / 14 ** 2 + (y - 30) ** 2 / 18 ** 2 < 1 ? face : backdrop));
+  const box = { x: (30 - 14) / 160, y: (30 - 18) / 120, w: 28 / 160, h: 36 / 120 };
+  const withFace = compute(img, [box]);
+  assert.ok(sampleSkinMask(withFace, 30, 34) > 0.8, `face ${sampleSkinMask(withFace, 30, 34)}`);
+  assert.ok(sampleSkinMask(withFace, 120, 90) < 0.3, `backdrop ${sampleSkinMask(withFace, 120, 90)}`);
+});

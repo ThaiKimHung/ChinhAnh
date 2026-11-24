@@ -2,6 +2,7 @@ import React from 'react';
 import { Sparkles, Eraser, Paintbrush, Plus, Minus } from 'lucide-react';
 import { DEFAULT_BEAUTY } from '../../engine/imagePipeline';
 import { SliderRow } from './controls';
+import FaceStatus from './FaceStatus';
 
 export default function PortraitPanel({
   onCommitHistory,
@@ -10,6 +11,8 @@ export default function PortraitPanel({
   brushTool,
   setBrushTool,
   onResetSkinRegion,
+  faceStatus,
+  faceCount = 0,
   brushSize,
   setBrushSize,
   brushStrength,
@@ -99,6 +102,11 @@ export default function PortraitPanel({
             );
           })}
         </div>
+        <FaceStatus
+          status={faceStatus}
+          count={faceCount}
+          foundText={(n) => `Màu da lấy theo ${n > 1 ? `${n} khuôn mặt` : 'khuôn mặt'} đã nhận diện.`}
+        />
         <p className="text-[11px] text-slate-400 leading-relaxed">
           Vùng được làm mịn, làm sáng và hồng hào hiện màu cam khi bật cọ. Tô thêm chỗ da bị bỏ sót (ảnh cháy sáng,
           da trong bóng tối) hoặc bớt chỗ không phải da (tóc, áo, tường cùng màu).

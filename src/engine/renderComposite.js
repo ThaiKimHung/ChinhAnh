@@ -27,8 +27,9 @@ export function renderCompositeCanvas({
   logoConfig,
   resolutionScale = 1,
   skinOverride = null,
+  faces = null,
 }) {
-  const processed = processImage(workData, adjustments, beauty, skinOverride);
+  const processed = processImage(workData, adjustments, beauty, skinOverride, faces);
   const fgCanvas = document.createElement('canvas');
   fgCanvas.width = processed.width;
   fgCanvas.height = processed.height;

@@ -121,11 +121,69 @@ function boxBlurMap(map, w, h, radius) {
   return out;
 }
 
-/** Builds the quarter-resolution skin map: { mask (Uint8Array), width, height, tone }. */
-export function computeSkinMask(imageData) {
+/**
+ * Skin tone measured on detected faces (normalised boxes): the median chroma of
+ * the cheek/nose/mouth area, plus how widely it spreads (wider on
+ * overexposed or unevenly lit skin). Null when no usable pixels.
+ */
+export function toneFromFaces(imageData, faces, lumLow = 30) {
+  const { width, height, data } = imageData;
+  const cbs = [], crs = [];
+  for (const f of faces ?? []) {
+    const x0 = Math.max(0, Math.round((f.x + f.w * 0.2) * width));
+    const x1 = Math.min(width - 1, Math.round((f.x + f.w * 0.8) * width));
+    const y0 = Math.max(0, Math.round((f.y + f.h * 0.4) * height));
+    const y1 = Math.min(height - 1, Math.round((f.y + f.h * 0.85) * height));
+    const step = Math.max(1, Math.round(Math.sqrt(((x1 - x0) * (y1 - y0)) / 4000)));
+    for (let y = y0; y <= y1; y += step) {
+      for (let x = x0; x <= x1; x += step) {
+        const i = (y * width + x) * 4;
+        if (data[i + 3] < 128) continue;
+        const c = chroma(data[i], data[i + 1], data[i + 2]);
+        if (c.y < lumLow || c.y > 252) continue;
+        cbs.push(c.cb);
+        crs.push(c.cr);
+      }
+    }
+  }
+  if (cbs.length < 30) return null;
+  const median = (a) => a.slice().sort((p, q) => p - q)[a.length >> 1];
+  const spread = (a, m) => median(a.map((v) => Math.abs(v - m))) * 1.4826;
+  const cb = median(cbs), cr = median(crs);
+  return {
+    cb,
+    cr,
+    sigmaCb: Math.min(13, Math.max(SIGMA_CB, spread(cbs, cb) * 1.6)),
+    sigmaCr: Math.min(13, Math.max(SIGMA_CR, spread(crs, cr) * 1.6)),
+  };
+}
+
+/**
+ * Builds the quarter-resolution skin map: { mask (Uint8Array), width, height, tone }.
+ * With detected `faces` the tone comes from the faces themselves.
+ */
+export function computeSkinMask(imageData, faces = null) {
   const { width, height, data } = imageData;
   const lumLow = darkLimit(data, width, height);
-  const tone = findSkinTone(data, width, height, lumLow);
+  const faceTone = faces?.length ? toneFromFaces(imageData, faces, lumLow) : null;
+  const tone = faceTone ?? findSkinTone(data, width, height, lumLow);
+  const sigmaCb = faceTone?.sigmaCb ?? SIGMA_CB;
+  const sigmaCr = faceTone?.sigmaCr ?? SIGMA_CR;
+  // With faces, skin is expected on and around them (face, neck, body below);
+  // colour matches far above or beside them (backdrops) count less.
+  const nearFace = faceTone
+    ? (px, py) => {
+        let best = 0;
+        for (const f of faces) {
+          const cx = (f.x + f.w / 2) * width, cy = (f.y + f.h / 2) * height;
+          const fw = f.w * width, fh = f.h * height;
+          const dx = (px - cx) / (fw * 1.1);
+          const dy = (py - cy) / (py < cy ? fh * 0.9 : fh * 3);
+          best = Math.max(best, Math.min(1, Math.max(0.15, 1.5 - Math.hypot(dx, dy))));
+        }
+        return best;
+      }
+    : null;
   const lw = Math.ceil(width / SKIN_MASK_SCALE);
   const lh = Math.ceil(height / SKIN_MASK_SCALE);
   const sum = new Float32Array(lw * lh);
@@ -139,9 +197,9 @@ export function computeSkinMask(imageData) {
       if (data[i + 3] < 8) continue;
       const { y: lum, cb, cr } = chroma(data[i], data[i + 1], data[i + 2]);
       const dcb = cb - tone.cb, dcr = cr - tone.cr;
-      const w = Math.exp(-(dcb * dcb) / (2 * SIGMA_CB * SIGMA_CB) - (dcr * dcr) / (2 * SIGMA_CR * SIGMA_CR));
+      const w = Math.exp(-(dcb * dcb) / (2 * sigmaCb * sigmaCb) - (dcr * dcr) / (2 * sigmaCr * sigmaCr));
       const lumGate = Math.min(1, Math.max(0, (lum - lumLow) / 30));
-      sum[l] += w * lumGate;
+      sum[l] += w * lumGate * (nearFace ? nearFace(x, y) : 1);
     }
   }
   for (let l = 0; l < sum.length; l++) sum[l] = count[l] ? sum[l] / count[l] : 0;
@@ -151,7 +209,8 @@ export function computeSkinMask(imageData) {
   let total = 0;
   for (let l = 0; l < smooth.length; l++) total += Math.min(1, smooth[l] * 1.25);
   const coverage = total / smooth.length;
-  const trust = Math.min(1, Math.max(0, (0.85 - coverage) / 0.25));
+  // A detected face proves there is a person (a close-up may be mostly skin).
+  const trust = faceTone ? 1 : Math.min(1, Math.max(0, (0.85 - coverage) / 0.25));
   const mask = new Uint8Array(lw * lh);
   for (let l = 0; l < mask.length; l++) mask[l] = Math.round(Math.min(1, smooth[l] * 1.25) * trust * 255);
   return { mask, width: lw, height: lh, tone };
@@ -173,14 +232,15 @@ export function sampleSkinMask(skin, x, y) {
 const cache = new WeakMap();
 
 /** Cached per image buffer; recomputed when sampled pixels change (e.g. after a brush edit). */
-export function getSkinMask(imageData) {
+export function getSkinMask(imageData, faces = null) {
   const { data } = imageData;
   let signature = 0;
   const stride = Math.max(4, Math.floor(data.length / 4096) * 4);
   for (let i = 0; i < data.length; i += stride) signature = (Math.imul(signature, 31) + data[i] + data[i + 1] * 3) | 0;
+  for (const f of faces ?? []) signature = (Math.imul(signature, 31) + Math.round((f.x + f.y * 7 + f.w * 13 + f.h * 17) * 1e4)) | 0;
   const hit = cache.get(imageData);
   if (hit && hit.signature === signature) return hit.skin;
-  const skin = computeSkinMask(imageData);
+  const skin = computeSkinMask(imageData, faces);
   cache.set(imageData, { signature, skin });
   return skin;
 }
@@ -251,8 +311,8 @@ export function applySkinOverride(skin, override) {
 }
 
 /** Skin mask of the photo with the user's painted corrections applied. */
-export function getEffectiveSkinMask(imageData, override) {
-  return applySkinOverride(getSkinMask(imageData), override);
+export function getEffectiveSkinMask(imageData, override, faces = null) {
+  return applySkinOverride(getSkinMask(imageData, faces), override);
 }
 
 export function cloneSkinOverride(override) {

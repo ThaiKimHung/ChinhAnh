@@ -38,6 +38,7 @@ import { cloneSkinOverride, createSkinOverride, getEffectiveSkinMask, paintSkinO
 import { pastePatch } from './engine/patch';
 import { generateIdSheet, withPrintDpi } from './engine/idPhoto';
 import { createLiquifySession, liquifyDab } from './engine/liquify';
+import { detectFaces, eyeEnlargeDabs, faceSlimDabs } from './engine/faces';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   canvasToBlob,
@@ -100,6 +101,7 @@ export default function App() {
   const cutoutAlphaRef = useRef(null);
   // Manual corrections to the automatic skin mask ("Thêm/Bớt vùng da" brushes).
   const skinOverrideRef = useRef(null);
+  const facesRef = useRef(null); // latest detected faces, for sessions and exports
   const [skinOverlayCanvas, setSkinOverlayCanvas] = useState(null);
   const [originalCanvasState, setOriginalCanvasState] = useState(null);
   const [hasCutoutMask, setHasCutoutMask] = useState(false);
@@ -310,6 +312,7 @@ export default function App() {
       cutoutAlpha: cutoutAlphaRef.current,
       hasCutoutMask: !!cutoutAlphaRef.current,
       skinOverride: skinOverrideRef.current,
+      faces: facesRef.current,
       eraseMask: eraseMaskRef.current,
       eraseMaskCanvas: eraseMaskCanvasRef.current,
       hasEraseMask,
@@ -619,6 +622,31 @@ export default function App() {
     ],
   });
 
+  // Faces (normalised boxes) for the current photo and crop. Detected when a
+  // face feature is in use; the skin tone then comes from the faces.
+  const [faceState, setFaceState] = useState({ key: null, faces: null, error: false });
+  const faceKey = imageSize ? `${activeImageId}:${imageSize.width}x${imageSize.height}:${geometry.length}` : null;
+  const facesKnown = faceKey !== null && faceState.key === faceKey;
+  const currentFaces = facesKnown ? faceState.faces : null;
+  const beautyInUse = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
+  const wantFaces = faceKey !== null && (activeTab === 'portrait' || activeTab === 'liquify' || beautyInUse);
+  const faceStatus = !faceKey ? 'idle' : facesKnown ? (faceState.error ? 'error' : currentFaces?.length ? 'found' : 'none') : wantFaces ? 'detecting' : 'idle';
+  useEffect(() => {
+    const workData = workDataRef.current;
+    if (!wantFaces || facesKnown || !workData) return;
+    let cancelled = false;
+    detectFaces(workData)
+      .then((faces) => !cancelled && setFaceState({ key: faceKey, faces, error: false }))
+      .catch(() => !cancelled && setFaceState({ key: faceKey, faces: [], error: true }));
+    return () => {
+      cancelled = true;
+    };
+  }, [faceKey, facesKnown, wantFaces]);
+
+  useEffect(() => {
+    facesRef.current = currentFaces;
+  }, [currentFaces]);
+
   // Re-render pipeline throttled with requestAnimationFrame
   useEffect(() => {
     const workData = workDataRef.current;
@@ -631,6 +659,7 @@ export default function App() {
         origCanvas: origCanvasRef.current,
         cutoutAlpha: cutoutAlphaRef.current,
         skinOverride: skinOverrideRef.current,
+        faces: currentFaces,
         adjustments,
         beauty,
         bgState,
@@ -644,7 +673,7 @@ export default function App() {
     });
 
     return () => cancelAnimationFrame(rafId);
-  }, [activeImageId, adjustments, beauty, bgState, textConfig, frameConfig, logoConfig, renderTick, hasCutoutMask]);
+  }, [activeImageId, adjustments, beauty, bgState, textConfig, frameConfig, logoConfig, renderTick, hasCutoutMask, currentFaces]);
 
   // Tint the skin region while a skin-region brush is selected.
   const showSkinRegion = activeTab === 'portrait' && (brushTool === 'skin-add' || brushTool === 'skin-remove');
@@ -857,6 +886,37 @@ export default function App() {
     }
   }, [handleClearEraseMask, imageJobs, pushSnapshot]);
 
+  /** The liquify displacement session for the current pixels (a new one after any other pixel edit). */
+  const ensureLiquifySession = useCallback((workData) => {
+    const matte = cutoutAlphaRef.current;
+    let session = liquifySessionRef.current;
+    if (
+      !session || session.work !== workData || session.matte !== matte ||
+      session.version !== pixelEditVersionRef.current
+    ) {
+      session = { work: workData, matte, version: pixelEditVersionRef.current, field: createLiquifySession(workData, matte) };
+      liquifySessionRef.current = session;
+    }
+    return session;
+  }, []);
+
+  /** One-tap eye enlarging / face slimming on every detected face. */
+  const handleFaceRetouch = useCallback((kind, amount) => {
+    const workData = workDataRef.current;
+    if (!workData || !currentFaces?.length) return;
+    cancelEraseJob();
+    const session = ensureLiquifySession(workData);
+    const { width, height } = workData;
+    for (const face of currentFaces) {
+      const dabs = kind === 'eyes' ? eyeEnlargeDabs(face, width, height, amount) : faceSlimDabs(face, width, height, amount);
+      for (const d of dabs) liquifyDab(session.field, workData, d.x0, d.y0, d.x1, d.y1, d.radius, d.strength, d.mode, session.matte);
+    }
+    imageJobs.invalidate();
+    pushSnapshot(true);
+    session.version = pixelEditVersionRef.current;
+    setRenderTick((t) => t + 1);
+  }, [cancelEraseJob, currentFaces, ensureLiquifySession, imageJobs, pushSnapshot]);
+
   const applyBrushDab = useCallback((fromX, fromY, x, y) => {
     const workData = workDataRef.current;
     if (!workData) return false;
@@ -877,21 +937,8 @@ export default function App() {
       applySkinBrushStroke(workData, origDataRef.current, x, y, brushSize, strength, brushTool, base);
     } else if (activeTab === 'liquify') {
       if (liquifyMode === 'push' && fromX === x && fromY === y) return false;
-      const matte = cutoutAlphaRef.current;
-      let session = liquifySessionRef.current;
-      if (
-        !session || session.work !== workData || session.matte !== matte ||
-        session.version !== pixelEditVersionRef.current
-      ) {
-        session = {
-          work: workData,
-          matte,
-          version: pixelEditVersionRef.current,
-          field: createLiquifySession(workData, matte),
-        };
-        liquifySessionRef.current = session;
-      }
-      liquifyDab(session.field, workData, fromX, fromY, x, y, brushSize, strength, liquifyMode, matte);
+      const session = ensureLiquifySession(workData);
+      liquifyDab(session.field, workData, fromX, fromY, x, y, brushSize, strength, liquifyMode, session.matte);
     } else if (activeTab === 'erase' && eraseMode === 'clone' && cloneOffsetRef.current) {
       const { dx, dy } = cloneOffsetRef.current;
       applyCloneStampStroke(workData, x, y, dx, dy, brushSize, strength, cloneToneMatch);
@@ -903,7 +950,7 @@ export default function App() {
       return false;
     }
     return true;
-  }, [activeTab, bgMaskBrush, brushSize, brushStrength, brushTool, cloneToneMatch, eraseMode, liquifyMode]);
+  }, [activeTab, bgMaskBrush, brushSize, brushStrength, brushTool, cloneToneMatch, ensureLiquifySession, eraseMode, liquifyMode]);
 
   const updateBrushPreview = useCallback(() => {
     brushEditedRef.current = true;
@@ -1206,7 +1253,9 @@ export default function App() {
       ? await renderForExport(activeItem, captureCurrentSession(), resolution, null, workMaxDim)
       : displayCanvas;
     if (!idSheetGrid) return source;
-    return generateIdSheet(source, idSheetGrid);
+    // ID photos are framed around the head; detect now if not done yet.
+    const faces = currentFaces ?? (await detectFaces(source).catch(() => null));
+    return generateIdSheet(source, idSheetGrid, faces);
   }
 
   const handleExport = async ({ format, quality, scale, fileName, idSheetGrid, resolution }) => {
@@ -1514,6 +1563,9 @@ export default function App() {
           brushTool={brushTool}
           setBrushTool={setBrushTool}
           onResetSkinRegion={handleResetSkinRegion}
+          faceStatus={faceStatus}
+          faceCount={currentFaces?.length ?? 0}
+          onFaceRetouch={handleFaceRetouch}
           brushSize={brushSize}
           setBrushSize={setBrushSize}
           brushStrength={brushStrength}

@@ -6,6 +6,7 @@
 // exported file carries 300 dpi so print dialogs use the right size.
 
 import { getSkinMask, sampleSkinMask } from './skinMask.js';
+import { idCropFromFace } from './faces.js';
 
 export const ID_DPI = 300;
 
@@ -84,21 +85,27 @@ export function findFaceFocus(imageData) {
 }
 
 /** Renders the print sheet for `sheetId` ('3x4' | '4x6') from the finished photo. */
-export function generateIdSheet(sourceCanvas, sheetId) {
+export function generateIdSheet(sourceCanvas, sheetId, faces = null) {
   const { sheetW, sheetH, photoW, photoH, cells } = idSheetLayout(sheetId);
+  // With a detected face the head is framed to ID-photo proportions.
+  const faceCrop = faces?.length
+    ? idCropFromFace(sourceCanvas.width, sourceCanvas.height, photoW / photoH, faces[0])
+    : null;
   let focus = null;
-  try {
-    const probe = document.createElement('canvas');
-    const scale = Math.min(1, 480 / Math.max(sourceCanvas.width, sourceCanvas.height));
-    probe.width = Math.max(1, Math.round(sourceCanvas.width * scale));
-    probe.height = Math.max(1, Math.round(sourceCanvas.height * scale));
-    const pctx = probe.getContext('2d', { willReadFrequently: true });
-    pctx.drawImage(sourceCanvas, 0, 0, probe.width, probe.height);
-    focus = findFaceFocus(pctx.getImageData(0, 0, probe.width, probe.height));
-  } catch {
-    focus = null;
+  if (!faceCrop) {
+    try {
+      const probe = document.createElement('canvas');
+      const scale = Math.min(1, 480 / Math.max(sourceCanvas.width, sourceCanvas.height));
+      probe.width = Math.max(1, Math.round(sourceCanvas.width * scale));
+      probe.height = Math.max(1, Math.round(sourceCanvas.height * scale));
+      const pctx = probe.getContext('2d', { willReadFrequently: true });
+      pctx.drawImage(sourceCanvas, 0, 0, probe.width, probe.height);
+      focus = findFaceFocus(pctx.getImageData(0, 0, probe.width, probe.height));
+    } catch {
+      focus = null;
+    }
   }
-  const crop = idCropRect(sourceCanvas.width, sourceCanvas.height, photoW / photoH, focus);
+  const crop = faceCrop ?? idCropRect(sourceCanvas.width, sourceCanvas.height, photoW / photoH, focus);
 
   const out = document.createElement('canvas');
   out.width = sheetW;

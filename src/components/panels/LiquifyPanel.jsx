@@ -1,6 +1,7 @@
-import React from 'react';
-import { Wand2, Move, Maximize2, Minimize2, Undo } from 'lucide-react';
+import React, { useState } from 'react';
+import { Wand2, Move, Maximize2, Minimize2, Undo, Eye, ScanFace } from 'lucide-react';
 import { SliderRow } from './controls';
+import FaceStatus from './FaceStatus';
 
 export default function LiquifyPanel({
   brushSize,
@@ -11,9 +12,43 @@ export default function LiquifyPanel({
   setLiquifyMode,
   onResetLiquify,
   hasCutoutMask,
+  faceStatus,
+  faceCount = 0,
+  onFaceRetouch,
 }) {
+  const [faceAmount, setFaceAmount] = useState(50);
+  const ready = faceStatus === 'found';
   return (
     <div className="space-y-4">
+      <div className="space-y-2.5 rounded-xl border border-[#262c3b] bg-[#171a23] p-3">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Chỉnh khuôn mặt tự động</h3>
+        <FaceStatus
+          status={faceStatus}
+          count={faceCount}
+          foundText={(n) => (n > 1 ? `Đã nhận diện ${n} khuôn mặt — áp dụng cho tất cả.` : 'Đã nhận diện khuôn mặt.')}
+        />
+        <SliderRow label="Mức độ" min={10} max={100} unit="%" value={faceAmount} onChange={setFaceAmount} onReset={() => setFaceAmount(50)} />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onFaceRetouch('eyes', faceAmount / 100)}
+            disabled={!ready}
+            className="py-2 px-2 rounded-lg border border-[#2f3647] bg-[#202532] hover:bg-[#2a3041] disabled:opacity-45 text-xs font-medium text-slate-200 flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5 text-amber-400" />
+            <span>Mắt to</span>
+          </button>
+          <button
+            onClick={() => onFaceRetouch('slim', faceAmount / 100)}
+            disabled={!ready}
+            className="py-2 px-2 rounded-lg border border-[#2f3647] bg-[#202532] hover:bg-[#2a3041] disabled:opacity-45 text-xs font-medium text-slate-200 flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <ScanFace className="w-3.5 h-3.5 text-amber-400" />
+            <span>Mặt thon</span>
+          </button>
+        </div>
+        <p className="text-[11px] text-slate-500">Mỗi lần bấm chỉnh thêm một chút. Hoàn tác bằng Ctrl+Z.</p>
+      </div>
+
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
           Nắn bóp khuôn mặt &amp; dáng

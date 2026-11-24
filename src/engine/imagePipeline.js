@@ -378,12 +378,12 @@ function rollOff(v, base) {
 /** Share of fine pore texture put back after skin smoothing (avoids a waxy look). */
 export const SKIN_TEXTURE_KEEP = 0.6;
 
-export function processImagePipeline(srcImageData, adjustments, beauty, skinOverride = null) {
+export function processImagePipeline(srcImageData, adjustments, beauty, skinOverride = null, faces = null) {
   const { width, height, data: src } = srcImageData;
   const out = new Uint8ClampedArray(src.length);
 
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
-  const skin = hasBeauty ? getEffectiveSkinMask(srcImageData, skinOverride) : null;
+  const skin = hasBeauty ? getEffectiveSkinMask(srcImageData, skinOverride, faces) : null;
   let blurred = null;
   let fineBlur = null;
   if (beauty.skinSmooth > 0) {

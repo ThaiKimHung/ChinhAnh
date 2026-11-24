@@ -1,14 +1,15 @@
 // Offline support for ChinhAnh.
 // - Page navigations: network first, falling back to the cached app shell.
 // - Hashed build assets (/assets/*): cache first; they never change.
-// - AI background-removal model files (staticimgly.com): cache first, so the
-//   feature keeps working offline after it has been used once.
+// - AI model files (background removal on staticimgly.com, face detection on
+//   storage.googleapis.com): cache first, so the features keep working offline
+//   after they have been used once.
 // - Other same-origin files: stale-while-revalidate.
 // - Pages are served with cross-origin isolation headers (COOP/COEP), which
 //   static hosts such as GitHub Pages cannot set. That unlocks multi-threaded
 //   WebAssembly, making the AI cutout several times faster.
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL_CACHE = `chinhanh-shell-${VERSION}`;
 const ASSET_CACHE = `chinhanh-assets-${VERSION}`;
 const MODEL_CACHE = 'chinhanh-ai-models';
@@ -97,7 +98,7 @@ self.addEventListener('fetch', (event) => {
 
   if (request.mode === 'navigate' && url.origin === SCOPE.origin) {
     event.respondWith(networkFirstShell(request));
-  } else if (url.hostname === 'staticimgly.com') {
+  } else if (url.hostname === 'staticimgly.com' || url.hostname === 'storage.googleapis.com') {
     event.respondWith(cacheFirst(request, MODEL_CACHE));
   } else if (url.origin === SCOPE.origin && url.pathname.startsWith(`${SCOPE.pathname}assets/`)) {
     event.respondWith(cacheFirst(request, ASSET_CACHE));
