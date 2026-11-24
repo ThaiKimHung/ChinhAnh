@@ -32,7 +32,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # UI flows on the production build, GPU vs CPU parity, AI cutout and face detection.
       - run: npm run test:e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
