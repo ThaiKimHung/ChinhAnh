@@ -36,7 +36,8 @@ import { applyCloneStampStroke } from './engine/inpaint';
 import { cloneSkinOverride, createSkinOverride, getEffectiveSkinMask, paintSkinOverride } from './engine/skinMask';
 import { generateIdSheet, withPrintDpi } from './engine/idPhoto';
 import { createLiquifySession, liquifyDab } from './engine/liquify';
-import { detectFaces, eyeEnlargeDabs, faceSlimDabs } from './engine/faces';
+import { biggestFace, detectFaces, eyeEnlargeDabs, faceSlimDabs } from './engine/faces';
+import { hasBeautyEffect, sharedBeauty } from './engine/beautyWeights';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
   cloneImageData,
@@ -171,12 +172,18 @@ export default function App() {
   const [editorNotice, setEditorNotice] = useState('');
 
   // Faces for the one-tap retouch, skin tone and ID crop; detected while a face feature is in use.
-  const beautyInUse = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
-  const { faces: currentFaces, status: faceStatus, facesRef } = useFaceDetection({
+  const {
+    faces: currentFaces,
+    status: faceStatus,
+    facesRef,
+    thumbs: faceThumbs,
+    selected: selectedFace,
+    select: selectFace,
+  } = useFaceDetection({
     imageId: activeImageId,
     imageSize,
     geometryLength: geometry.length,
-    wanted: activeTab === 'portrait' || activeTab === 'liquify' || beautyInUse,
+    wanted: activeTab === 'portrait' || activeTab === 'liquify' || hasBeautyEffect(beauty),
     workDataRef,
   });
 
@@ -737,14 +744,15 @@ export default function App() {
     return session;
   }, []);
 
-  /** One-tap eye enlarging / face slimming on every detected face. */
+  /** One-tap eye enlarging / face slimming on the picked person, or on everyone. */
   const handleFaceRetouch = useCallback((kind, amount) => {
     const workData = workDataRef.current;
     if (!workData || !currentFaces?.length) return;
     cancelEraseJob();
     const session = ensureLiquifySession(workData);
     const { width, height } = workData;
-    for (const face of currentFaces) {
+    const targets = selectedFace === null ? currentFaces : [currentFaces[selectedFace]];
+    for (const face of targets) {
       const dabs = kind === 'eyes' ? eyeEnlargeDabs(face, width, height, amount) : faceSlimDabs(face, width, height, amount);
       for (const d of dabs) liquifyDab(session.field, workData, d.x0, d.y0, d.x1, d.y1, d.radius, d.strength, d.mode, session.matte);
     }
@@ -752,7 +760,7 @@ export default function App() {
     pushSnapshot(true);
     session.version = pixelEditVersionRef.current;
     setRenderTick((t) => t + 1);
-  }, [cancelEraseJob, currentFaces, ensureLiquifySession, imageJobs, pushSnapshot]);
+  }, [cancelEraseJob, currentFaces, ensureLiquifySession, imageJobs, pushSnapshot, selectedFace]);
 
   const applyBrushDab = useCallback((fromX, fromY, x, y) => {
     const workData = workDataRef.current;
@@ -985,14 +993,15 @@ export default function App() {
     setCopiedStyle({
       adjustments: { ...adjustments },
       activePreset,
-      beauty: { ...beauty },
+      beauty: sharedBeauty(beauty),
     });
   };
 
   const handlePasteStyle = () => {
     if (!copiedStyle) return;
     const nextAdj = { ...copiedStyle.adjustments };
-    const nextBeauty = { ...copiedStyle.beauty };
+    // Keep this photo's per-person skin levels.
+    const nextBeauty = beauty.perFace ? { ...copiedStyle.beauty, perFace: beauty.perFace } : { ...copiedStyle.beauty };
     setAdjustments(nextAdj);
     setActivePreset(copiedStyle.activePreset);
     setBeauty(nextBeauty);
@@ -1008,7 +1017,7 @@ export default function App() {
     const style = {
       adjustments: { ...adjustments },
       activePreset,
-      beauty: { ...beauty },
+      beauty: sharedBeauty(beauty),
     };
     setCopiedStyle(style);
     images.forEach((img) => {
@@ -1037,7 +1046,8 @@ export default function App() {
     if (!idSheetGrid) return source;
     // ID photos are framed around the head; detect now if not done yet.
     const faces = currentFaces ?? (await detectFaces(source).catch(() => null));
-    return generateIdSheet(source, idSheetGrid, faces);
+    const face = faces?.[selectedFace ?? biggestFace(faces)] ?? null;
+    return generateIdSheet(source, idSheetGrid, face);
   }
 
   const handleExport = async ({ format, quality, scale, fileName, idSheetGrid, resolution }) => {
@@ -1242,6 +1252,11 @@ export default function App() {
             onStrokeEnd={handleStrokeEnd}
             eraseMaskCanvas={!inspecting && activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvas : null}
             skinOverlayCanvas={inspecting ? null : skinOverlayCanvas}
+            faceMarks={
+              !inspecting && (activeTab === 'portrait' || activeTab === 'liquify') && currentFaces?.length > 1
+                ? { faces: currentFaces, selected: selectedFace, onSelect: selectFace }
+                : null
+            }
             patchActive={!inspecting && patchActive}
             patchRect={inspecting ? null : patch.rect}
             patchOffset={patch.offset}
@@ -1345,6 +1360,9 @@ export default function App() {
           onResetSkinRegion={handleResetSkinRegion}
           faceStatus={faceStatus}
           faceCount={currentFaces?.length ?? 0}
+          faceThumbs={faceThumbs}
+          selectedFace={selectedFace}
+          onSelectFace={selectFace}
           onFaceRetouch={handleFaceRetouch}
           brushSize={brushSize}
           setBrushSize={setBrushSize}

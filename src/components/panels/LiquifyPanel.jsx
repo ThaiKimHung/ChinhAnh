@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Wand2, Move, Maximize2, Minimize2, Undo, Eye, ScanFace } from 'lucide-react';
 import { SliderRow } from './controls';
 import FaceStatus from './FaceStatus';
+import FacePicker from './FacePicker';
 
 export default function LiquifyPanel({
   brushSize,
@@ -15,6 +16,9 @@ export default function LiquifyPanel({
   faceStatus,
   faceCount = 0,
   onFaceRetouch,
+  faceThumbs = null,
+  selectedFace = null,
+  onSelectFace,
 }) {
   const [faceAmount, setFaceAmount] = useState(50);
   const ready = faceStatus === 'found';
@@ -25,8 +29,9 @@ export default function LiquifyPanel({
         <FaceStatus
           status={faceStatus}
           count={faceCount}
-          foundText={(n) => (n > 1 ? `Đã nhận diện ${n} khuôn mặt — áp dụng cho tất cả.` : 'Đã nhận diện khuôn mặt.')}
+          foundText={(n) => (n > 1 ? `Đã nhận diện ${n} khuôn mặt.` : 'Đã nhận diện khuôn mặt.')}
         />
+        <FacePicker thumbs={faceThumbs} selected={selectedFace} onSelect={onSelectFace} />
         <SliderRow label="Mức độ" min={10} max={100} unit="%" value={faceAmount} onChange={setFaceAmount} onReset={() => setFaceAmount(50)} />
         <div className="grid grid-cols-2 gap-2">
           <button

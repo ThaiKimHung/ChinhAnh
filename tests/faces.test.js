@@ -1,24 +1,59 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { eyeEnlargeDabs, faceSlimDabs, idCropFromFace, normalizeDetections } from '../src/engine/faces.js';
+import { biggestFace, eyeEnlargeDabs, faceSlimDabs, idCropFromFace, mergeFaces, normalizeDetections, readingOrder, tileRects } from '../src/engine/faces.js';
 
 const face = {
   x: 0.35, y: 0.25, w: 0.3, h: 0.3, score: 0.95,
   rightEye: { x: 0.44, y: 0.35 }, leftEye: { x: 0.56, y: 0.35 }, nose: { x: 0.5, y: 0.42 }, mouth: { x: 0.5, y: 0.48 },
 };
 
-test('detections are normalised and the biggest face comes first', () => {
+test('detections are normalised, also from a tile of the photo', () => {
   const result = {
     detections: [
-      { boundingBox: { originX: 10, originY: 10, width: 20, height: 20 }, keypoints: [], categories: [{ score: 0.7 }] },
       { boundingBox: { originX: 100, originY: 50, width: 80, height: 90 }, keypoints: [{ x: 0.3, y: 0.2 }, { x: 0.4, y: 0.2 }], categories: [{ score: 0.9 }] },
     ],
   };
-  const faces = normalizeDetections(result, 400, 300);
-  assert.equal(faces.length, 2);
-  assert.deepEqual([faces[0].x, faces[0].y, faces[0].w, faces[0].h], [0.25, 50 / 300, 0.2, 0.3]);
-  assert.deepEqual(faces[0].rightEye, { x: 0.3, y: 0.2 });
-  assert.equal(faces[0].mouth, null);
+  const [whole] = normalizeDetections(result, 400, 300);
+  assert.deepEqual([whole.x, whole.y, whole.w, whole.h], [0.25, 50 / 300, 0.2, 0.3]);
+  assert.deepEqual(whole.rightEye, { x: 0.3, y: 0.2 });
+  assert.equal(whole.mouth, null);
+  // The same input showing a 800 × 600 tile at (1000, 600) of a 2000 × 1200 photo (scaled by 2).
+  const [tiled] = normalizeDetections(result, 400, 300, { x: 1000, y: 600, w: 800, h: 600 }, 2000, 1200);
+  assert.deepEqual([tiled.x, tiled.y, tiled.w, tiled.h], [0.6, 0.5 + 100 / 1200, 0.08, 0.15]);
+  assert.deepEqual(tiled.rightEye, { x: (1000 + 0.3 * 800) / 2000, y: (600 + 0.2 * 600) / 1200 });
+});
+
+test('tiles cover a large photo with overlap; small photos need none', () => {
+  assert.deepEqual(tileRects(700, 500), []);
+  const rects = tileRects(2400, 1200);
+  assert.ok(rects.length > 1);
+  for (const r of rects) assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= 2400 && r.y + r.h <= 1200);
+  // Every point is inside some tile.
+  for (const [x, y] of [[0, 0], [2399, 1199], [1200, 600], [1799, 10]]) {
+    assert.ok(rects.some((r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h), `${x},${y}`);
+  }
+});
+
+test('duplicate detections are merged and people are numbered left to right', () => {
+  const box = (x, y, w, h, score) => ({ x, y, w, h, score });
+  const merged = mergeFaces([
+    box(0.6, 0.2, 0.1, 0.1, 0.9),
+    box(0.61, 0.21, 0.1, 0.1, 0.7), // same face from another pass
+    box(0.6, 0.2, 0.04, 0.1, 0.6), // partial box from a tile edge
+    box(0.1, 0.19, 0.12, 0.12, 0.8),
+  ]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].x, 0.1);
+  assert.equal(merged[1].score, 0.9);
+  assert.equal(biggestFace(merged), 0);
+  assert.equal(biggestFace([]), -1);
+});
+
+test('people in two rows are numbered row by row', () => {
+  const at = (x, y) => ({ x, y, w: 0.08, h: 0.1, score: 0.9 });
+  // Back row slightly uneven, front row lower.
+  const order = readingOrder([at(0.5, 0.55), at(0.1, 0.22), at(0.2, 0.55), at(0.4, 0.2), at(0.7, 0.24)]);
+  assert.deepEqual(order.map((f) => [f.x, f.y]), [[0.1, 0.22], [0.4, 0.2], [0.7, 0.24], [0.2, 0.55], [0.5, 0.55]]);
 });
 
 test('eye enlarging places bloat dabs on both eyes, more for a stronger setting', () => {

@@ -52,7 +52,10 @@ export function appendHistoryEntry(
 }
 
 /** Record a parameter-only edit on an inactive photo without copying its pixels. */
-export function applyStyleToSession(session, style) {
+export function applyStyleToSession(session, rawStyle) {
+  // Per-person skin levels belong to that photo's people: keep the photo's own.
+  const perFace = session.beauty?.perFace;
+  const style = rawStyle.beauty && perFace ? { ...rawStyle, beauty: { ...rawStyle.beauty, perFace } } : rawStyle;
   const preceding = session.history.slice(0, session.historyIdx);
   const before = {
     workData: session.workData,

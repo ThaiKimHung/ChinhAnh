@@ -19,20 +19,35 @@ test('GPU and CPU pipelines agree', async ({ page }) => {
     ctx.drawImage(img, 0, 0, c.width, c.height);
     const src = ctx.getImageData(0, 0, c.width, c.height);
     const adjustments = { ...DEFAULT_ADJUSTMENTS, ...PRESETS[1].values };
-    const beauty = { skinSmooth: 60, skinBrighten: 30, skinRosy: 20 };
-    const gpu = processImageGpu(src, adjustments, beauty);
-    if (!gpu) return { gpu: false };
-    const cpu = processImagePipeline(src, adjustments, beauty);
-    let max = 0, sum = 0;
-    for (let i = 0; i < cpu.data.length; i++) {
-      if ((i & 3) === 3) continue;
-      const d = Math.abs(cpu.data[i] - gpu.data[i]);
-      sum += d;
-      if (d > max) max = d;
-    }
-    return { gpu: true, max, mean: sum / ((cpu.data.length / 4) * 3) };
+    const compare = (beauty, faces) => {
+      const gpu = processImageGpu(src, adjustments, beauty, null, faces);
+      if (!gpu) return null;
+      const cpu = processImagePipeline(src, adjustments, beauty, null, faces);
+      let max = 0, sum = 0;
+      for (let i = 0; i < cpu.data.length; i++) {
+        if ((i & 3) === 3) continue;
+        const d = Math.abs(cpu.data[i] - gpu.data[i]);
+        sum += d;
+        if (d > max) max = d;
+      }
+      return { max, mean: sum / ((cpu.data.length / 4) * 3) };
+    };
+    const shared = compare({ skinSmooth: 60, skinBrighten: 30, skinRosy: 20 }, null);
+    if (!shared) return { gpu: false };
+    // Two "people" (the real face and a made-up one on the right) with their own levels.
+    const faces = [
+      { x: 0.3, y: 0.25, w: 0.4, h: 0.33 },
+      { x: 0.75, y: 0.1, w: 0.2, h: 0.2 },
+    ];
+    const perPerson = compare(
+      { skinSmooth: 20, skinBrighten: 40, skinRosy: 0, perFace: { 0: { skinSmooth: 80, skinBrighten: 0, skinRosy: 30 } } },
+      faces,
+    );
+    return { gpu: true, shared, perPerson };
   });
   test.skip(!result.gpu, 'WebGL2 is not available in this browser');
-  expect(result.mean).toBeLessThan(0.5);
-  expect(result.max).toBeLessThanOrEqual(4);
+  for (const r of [result.shared, result.perPerson]) {
+    expect(r.mean).toBeLessThan(0.5);
+    expect(r.max).toBeLessThanOrEqual(4);
+  }
 });

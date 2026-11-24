@@ -3,6 +3,14 @@ import { Sparkles, Eraser, Paintbrush, Plus, Minus } from 'lucide-react';
 import { DEFAULT_BEAUTY } from '../../engine/imagePipeline';
 import { SliderRow } from './controls';
 import FaceStatus from './FaceStatus';
+import FacePicker from './FacePicker';
+import { personLevels, withPersonLevels } from '../../engine/beautyWeights';
+
+const BEAUTY_SLIDERS = [
+  { key: 'skinSmooth', label: 'Làm mịn da (Skin Smooth)' },
+  { key: 'skinBrighten', label: 'Làm sáng da (Brighten)' },
+  { key: 'skinRosy', label: 'Da hồng hào (Rosy)' },
+];
 
 export default function PortraitPanel({
   onCommitHistory,
@@ -13,11 +21,26 @@ export default function PortraitPanel({
   onResetSkinRegion,
   faceStatus,
   faceCount = 0,
+  faceThumbs = null,
+  selectedFace = null,
+  onSelectFace,
   brushSize,
   setBrushSize,
   brushStrength,
   setBrushStrength,
 }) {
+  // With one person picked, the sliders set that person's own levels.
+  const person = selectedFace;
+  const levels = personLevels(beauty, person);
+  const hasOwn = person !== null && !!beauty.perFace?.[person];
+  const customized = Object.keys(beauty.perFace ?? {}).map(Number);
+  const setLevel = (key, value) =>
+    setBeauty((b) => (person === null ? { ...b, [key]: value } : withPersonLevels(b, person, { ...personLevels(b, person), [key]: value })));
+  const useShared = () => {
+    const next = withPersonLevels(beauty, person, null);
+    setBeauty(next);
+    onCommitHistory({ beauty: next });
+  };
   return (
     <>
       <div className="space-y-3.5">
@@ -38,33 +61,34 @@ export default function PortraitPanel({
         <p className="text-[11px] text-slate-400 leading-relaxed">
           Tự động nhận diện vùng da và làm mịn giữ chi tiết mắt/tóc.
         </p>
-        <SliderRow
-          label="Làm mịn da (Skin Smooth)"
-          min={0}
-          max={100}
-          value={beauty.skinSmooth}
-          onChange={(v) => setBeauty((b) => ({ ...b, skinSmooth: v }))}
-          onReset={() => setBeauty((b) => ({ ...b, skinSmooth: 0 }))}
-          onCommit={onCommitHistory}
-        />
-        <SliderRow
-          label="Làm sáng da (Brighten)"
-          min={0}
-          max={100}
-          value={beauty.skinBrighten}
-          onChange={(v) => setBeauty((b) => ({ ...b, skinBrighten: v }))}
-          onReset={() => setBeauty((b) => ({ ...b, skinBrighten: 0 }))}
-          onCommit={onCommitHistory}
-        />
-        <SliderRow
-          label="Da hồng hào (Rosy)"
-          min={0}
-          max={100}
-          value={beauty.skinRosy}
-          onChange={(v) => setBeauty((b) => ({ ...b, skinRosy: v }))}
-          onReset={() => setBeauty((b) => ({ ...b, skinRosy: 0 }))}
-          onCommit={onCommitHistory}
-        />
+        <FacePicker thumbs={faceThumbs} selected={person} onSelect={onSelectFace} customized={customized} />
+        {person !== null && (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200">
+            <span>{hasOwn ? `Người ${person + 1} đang có mức riêng.` : `Kéo thanh để đặt mức riêng cho Người ${person + 1}.`}</span>
+            {hasOwn && (
+              <button type="button" onClick={useShared} className="shrink-0 cursor-pointer font-semibold text-amber-300 hover:text-amber-100">
+                Dùng mức chung
+              </button>
+            )}
+          </div>
+        )}
+        {person === null && customized.length > 0 && (
+          <p className="text-[11px] text-slate-400">
+            Mức chung áp dụng cho người không có mức riêng ({customized.map((i) => `Người ${i + 1}`).join(', ')} có mức riêng).
+          </p>
+        )}
+        {BEAUTY_SLIDERS.map(({ key, label }) => (
+          <SliderRow
+            key={key}
+            label={label}
+            min={0}
+            max={100}
+            value={levels[key]}
+            onChange={(v) => setLevel(key, v)}
+            onReset={() => setLevel(key, 0)}
+            onCommit={onCommitHistory}
+          />
+        ))}
       </div>
 
       <div className="pt-4 border-t border-[#232836] space-y-3">

@@ -49,6 +49,7 @@ export default function CanvasStage({
   eraseMaskCanvas,
   eraseMaskVersion,
   skinOverlayCanvas = null,
+  faceMarks = null,
   cloneSource,
   pickingCloneSource,
   onPickCloneSource,
@@ -447,6 +448,30 @@ export default function CanvasStage({
               transition: straightenAngle !== 0 ? 'transform 0.05s linear' : undefined,
             }}
           />
+
+          {/* People in the photo: numbered boxes; the number picks who face edits apply to. */}
+          {faceMarks && !isComparingOriginal && faceMarks.faces.map((f, i) => {
+            const picked = faceMarks.selected === i;
+            return (
+              <div
+                key={i}
+                className={`absolute pointer-events-none z-20 rounded-md border-2 ${picked ? 'border-amber-400' : 'border-dashed border-white/60'}`}
+                style={{ left: `${f.x * 100}%`, top: `${f.y * 100}%`, width: `${f.w * 100}%`, height: `${f.h * 100}%` }}
+              >
+                <button
+                  type="button"
+                  aria-pressed={picked}
+                  aria-label={`Chọn Người ${i + 1}`}
+                  title={picked ? 'Bỏ chọn, chỉnh tất cả' : `Chỉnh riêng Người ${i + 1}`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => faceMarks.onSelect(picked ? null : i)}
+                  className={`pointer-events-auto absolute -left-3 -top-3 grid h-6 min-w-6 cursor-pointer place-items-center rounded-full px-1 text-xs font-bold shadow ring-1 ring-black/40 focus-visible:outline-2 focus-visible:outline-amber-300 ${picked ? 'bg-amber-400 text-[#0f1116]' : 'bg-[#0f1116]/85 text-white hover:bg-[#1f2430]'}`}
+                >
+                  {i + 1}
+                </button>
+              </div>
+            );
+          })}
 
           {/* Straighten alignment grid */}
           {straightenAngle !== 0 && !isComparingOriginal && (

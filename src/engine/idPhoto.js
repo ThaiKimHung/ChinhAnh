@@ -84,13 +84,13 @@ export function findFaceFocus(imageData) {
   return { x: sx / sw / width, y: sy / sw / height };
 }
 
-/** Renders the print sheet for `sheetId` ('3x4' | '4x6') from the finished photo. */
-export function generateIdSheet(sourceCanvas, sheetId, faces = null) {
+/**
+ * Renders the print sheet for `sheetId` ('3x4' | '4x6') from the finished
+ * photo. With `face` (a detected face) the head is framed to ID-photo proportions.
+ */
+export function generateIdSheet(sourceCanvas, sheetId, face = null) {
   const { sheetW, sheetH, photoW, photoH, cells } = idSheetLayout(sheetId);
-  // With a detected face the head is framed to ID-photo proportions.
-  const faceCrop = faces?.length
-    ? idCropFromFace(sourceCanvas.width, sourceCanvas.height, photoW / photoH, faces[0])
-    : null;
+  const faceCrop = face ? idCropFromFace(sourceCanvas.width, sourceCanvas.height, photoW / photoH, face) : null;
   let focus = null;
   if (!faceCrop) {
     try {

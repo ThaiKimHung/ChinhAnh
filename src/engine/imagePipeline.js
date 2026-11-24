@@ -1,5 +1,6 @@
 import { createLiquifySession, liquifyDab } from './liquify.js';
-import { getEffectiveSkinMask, sampleSkinMask } from './skinMask.js';
+import { getEffectiveSkinMask } from './skinMask.js';
+import { effectiveBeauty, getBeautyWeights, sampleBeautyWeights } from './beautyWeights.js';
 import { fitOverlay, wrapCaption } from './overlayLayout.js';
 
 export const DEFAULT_HSL = {
@@ -382,14 +383,20 @@ export function processImagePipeline(srcImageData, adjustments, beauty, skinOver
   const { width, height, data: src } = srcImageData;
   const out = new Uint8ClampedArray(src.length);
 
-  const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
-  const skin = hasBeauty ? getEffectiveSkinMask(srcImageData, skinOverride, faces) : null;
+  // Per-person levels: the pipeline runs with the highest of each, and the
+  // weight map scales every person's skin down to their own level.
+  const levels = effectiveBeauty(beauty, faces);
+  const hasBeauty = levels.skinSmooth > 0 || levels.skinBrighten > 0 || levels.skinRosy > 0;
+  const weights = hasBeauty
+    ? getBeautyWeights(getEffectiveSkinMask(srcImageData, skinOverride, faces), faces, beauty, width, height)
+    : null;
+  const w3 = [0, 0, 0];
   let blurred = null;
   let fineBlur = null;
-  if (beauty.skinSmooth > 0) {
+  if (levels.skinSmooth > 0) {
     // 3×3 average: src − fineBlur is the pore-level texture restored after smoothing.
     fineBlur = boxBlurRGBA(src, width, height, 1);
-    const blurRadius = Math.max(2, Math.round((Math.min(width, height) / 360) * (2 + beauty.skinSmooth * 0.06)));
+    const blurRadius = Math.max(2, Math.round((Math.min(width, height) / 360) * (2 + levels.skinSmooth * 0.06)));
     blurred = boxBlurRGBA(src, width, height, blurRadius);
   }
 
@@ -421,9 +428,9 @@ export function processImagePipeline(srcImageData, adjustments, beauty, skinOver
   const fadeAmount = (adjustments.fade || 0) * 0.42;
   const grainAmount = (adjustments.grain || 0) * 0.45;
 
-  const smoothStrength = beauty.skinSmooth / 100;
-  const brightenAmount = beauty.skinBrighten * 0.35;
-  const rosyAmount = beauty.skinRosy * 0.22;
+  const smoothStrength = levels.skinSmooth / 100;
+  const brightenAmount = levels.skinBrighten * 0.35;
+  const rosyAmount = levels.skinRosy * 0.22;
 
   const halfW = width * 0.5;
   const halfH = height * 0.5;
@@ -449,30 +456,31 @@ export function processImagePipeline(srcImageData, adjustments, beauty, skinOver
 
       // 1. Portrait Beauty (skin-masked + edge-preserving)
       if (hasBeauty) {
-        const skinW = sampleSkinMask(skin, x, y);
-        if (skinW > 0.02) {
+        sampleBeautyWeights(weights, x, y, w3);
+        const [smoothW, brightW, rosyW] = w3;
+        if (smoothW > 0.02 || brightW > 0.02 || rosyW > 0.02) {
           if (blurred) {
             const br = blurred[i];
             const bg = blurred[i + 1];
             const bb = blurred[i + 2];
             const diff = (Math.abs(r - br) + Math.abs(g - bg) + Math.abs(b - bb)) / 3;
             const edgeKeep = Math.exp(-(diff * diff) / 380);
-            const blend = smoothStrength * skinW * edgeKeep * 0.85;
+            const blend = smoothStrength * smoothW * edgeKeep * 0.85;
             const keep = blend * SKIN_TEXTURE_KEEP;
             r = r + (br - r) * blend + (src[i] - fineBlur[i]) * keep;
             g = g + (bg - g) * blend + (src[i + 1] - fineBlur[i + 1]) * keep;
             b = b + (bb - b) * blend + (src[i + 2] - fineBlur[i + 2]) * keep;
           }
           if (brightenAmount > 0) {
-            const add = brightenAmount * skinW;
+            const add = brightenAmount * brightW;
             r += add;
             g += add * 0.96;
             b += add * 0.92;
           }
           if (rosyAmount > 0) {
-            r += rosyAmount * skinW;
-            g -= rosyAmount * 0.15 * skinW;
-            b += rosyAmount * 0.12 * skinW;
+            r += rosyAmount * rosyW;
+            g -= rosyAmount * 0.15 * rosyW;
+            b += rosyAmount * 0.12 * rosyW;
           }
         }
       }

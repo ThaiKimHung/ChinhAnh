@@ -6,11 +6,23 @@
 // and the full-resolution export alike:
 //   { x, y, w, h, score, leftEye, rightEye, nose, mouth }  (points are { x, y })
 
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
+const MODEL_BASE = 'https://storage.googleapis.com/mediapipe-models/face_detector';
+// Short range: faces close to the camera (portraits). Full range: faces up to
+// ~5 m away (group photos), also run on overlapping tiles for small faces.
+const MODELS = {
+  short: `${MODEL_BASE}/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
+  full: `${MODEL_BASE}/blaze_face_full_range/float16/1/blaze_face_full_range.tflite`,
+};
+const MAX_INPUT = 960;
 
-/** Converts a MediaPipe FaceDetector result for a width × height image. */
-export function normalizeDetections(result, width, height) {
+/**
+ * Converts a MediaPipe FaceDetector result for an input canvas that shows
+ * `rect` (source pixels) of a width × height source. Keypoints from MediaPipe
+ * are normalised to the input.
+ */
+export function normalizeDetections(result, inputW, inputH, rect = null, width = inputW, height = inputH) {
+  const r = rect ?? { x: 0, y: 0, w: width, h: height };
+  const sx = r.w / inputW, sy = r.h / inputH;
   const faces = [];
   for (const d of result?.detections ?? []) {
     const b = d.boundingBox;
@@ -18,12 +30,12 @@ export function normalizeDetections(result, width, height) {
     const kp = d.keypoints ?? [];
     // BlazeFace keypoints: right eye, left eye, nose tip, mouth, right ear, left ear
     // (the subject's right/left, i.e. right eye is on the image's left).
-    const point = (k) => (kp[k] ? { x: kp[k].x, y: kp[k].y } : null);
+    const point = (k) => (kp[k] ? { x: (r.x + kp[k].x * r.w) / width, y: (r.y + kp[k].y * r.h) / height } : null);
     faces.push({
-      x: b.originX / width,
-      y: b.originY / height,
-      w: b.width / width,
-      h: b.height / height,
+      x: (r.x + b.originX * sx) / width,
+      y: (r.y + b.originY * sy) / height,
+      w: (b.width * sx) / width,
+      h: (b.height * sy) / height,
       score: d.categories?.[0]?.score ?? 0,
       rightEye: point(0),
       leftEye: point(1),
@@ -31,14 +43,80 @@ export function normalizeDetections(result, width, height) {
       mouth: point(3),
     });
   }
-  return faces.sort((a, b) => b.w * b.h - a.w * a.h);
+  return faces;
 }
 
-let detectorPromise;
+/**
+ * Overlapping square-ish tiles (source pixels) for finding small faces in a
+ * large photo; empty when the whole photo is small enough on its own.
+ */
+export function tileRects(width, height) {
+  const long = Math.max(width, height);
+  if (long < 800) return [];
+  const side = Math.max(480, Math.round(long / 3));
+  const stride = Math.round(side * 0.75);
+  const starts = (size) => {
+    if (size <= side) return [0];
+    const out = [];
+    for (let v = 0; v + side < size; v += stride) out.push(v);
+    out.push(size - side);
+    return out;
+  };
+  const rects = [];
+  for (const y of starts(height)) {
+    for (const x of starts(width)) rects.push({ x, y, w: Math.min(side, width), h: Math.min(side, height) });
+  }
+  return rects;
+}
 
-async function getDetector() {
-  if (!detectorPromise) {
-    detectorPromise = (async () => {
+/**
+ * Drops duplicate detections of one face (overlapping boxes, or a partial box
+ * from a tile edge inside a bigger one), keeping the most confident. Faces are
+ * returned in reading order, so "Người 1" is the leftmost person of the top row.
+ */
+export function mergeFaces(faces) {
+  const sorted = [...faces].sort((a, b) => b.score - a.score);
+  const kept = [];
+  for (const f of sorted) {
+    const dup = kept.some((k) => {
+      const ix = Math.max(0, Math.min(f.x + f.w, k.x + k.w) - Math.max(f.x, k.x));
+      const iy = Math.max(0, Math.min(f.y + f.h, k.y + k.h) - Math.max(f.y, k.y));
+      const inter = ix * iy;
+      const minArea = Math.min(f.w * f.h, k.w * k.h);
+      return inter / (f.w * f.h + k.w * k.h - inter) > 0.3 || inter / minArea > 0.6;
+    });
+    if (!dup) kept.push(f);
+  }
+  return readingOrder(kept);
+}
+
+/** Faces row by row (top row first), each row left to right. */
+export function readingOrder(faces) {
+  const cy = (f) => f.y + f.h / 2;
+  const rows = [];
+  for (const f of [...faces].sort((a, b) => cy(a) - cy(b))) {
+    const row = rows.at(-1);
+    // Same row when the centre is within ~half a face height of the row's first face.
+    if (row && cy(f) - cy(row[0]) < Math.max(row[0].h, f.h) * 0.6) row.push(f);
+    else rows.push([f]);
+  }
+  return rows.flatMap((row) => row.sort((a, b) => a.x + a.w / 2 - (b.x + b.w / 2)));
+}
+
+/** Index of the biggest face (the main subject), or -1. */
+export function biggestFace(faces) {
+  let best = -1;
+  faces?.forEach((f, i) => {
+    if (best < 0 || f.w * f.h > faces[best].w * faces[best].h) best = i;
+  });
+  return best;
+}
+
+const detectorPromises = {};
+
+async function getDetector(kind) {
+  if (!detectorPromises[kind]) {
+    detectorPromises[kind] = (async () => {
       const [{ FaceDetector }, { default: wasmLoaderPath }, { default: wasmBinaryPath }] = await Promise.all([
         import('@mediapipe/tasks-vision'),
         import('@mediapipe/tasks-vision/vision_wasm_internal.js?url'),
@@ -46,42 +124,54 @@ async function getDetector() {
       ]);
       return FaceDetector.createFromOptions(
         { wasmLoaderPath, wasmBinaryPath },
-        { baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' }, runningMode: 'IMAGE', minDetectionConfidence: 0.5 },
+        { baseOptions: { modelAssetPath: MODELS[kind], delegate: 'CPU' }, runningMode: 'IMAGE', minDetectionConfidence: 0.5 },
       );
     })().catch((error) => {
-      detectorPromise = undefined;
+      detectorPromises[kind] = undefined;
       throw error;
     });
   }
-  return detectorPromise;
+  return detectorPromises[kind];
+}
+
+function toCanvas(source) {
+  if (!(source instanceof ImageData)) return source;
+  const c = document.createElement('canvas');
+  c.width = source.width;
+  c.height = source.height;
+  c.getContext('2d').putImageData(source, 0, 0);
+  return c;
+}
+
+/** `rect` of `source` scaled to fit MAX_INPUT. */
+function regionCanvas(source, rect) {
+  const scale = Math.min(1, MAX_INPUT / Math.max(rect.w, rect.h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(rect.w * scale));
+  c.height = Math.max(1, Math.round(rect.h * scale));
+  c.getContext('2d').drawImage(source, rect.x, rect.y, rect.w, rect.h, 0, 0, c.width, c.height);
+  return c;
 }
 
 /**
- * Detects faces in ImageData (or a canvas). BlazeFace works on a small input,
- * so large photos are scaled down first. Returns normalised faces, biggest first.
+ * Detects faces in ImageData (or a canvas): close-up faces with the short
+ * range model, distant ones with the full range model on the whole photo and
+ * on overlapping tiles. Returns normalised faces, left to right.
  */
 export async function detectFaces(source) {
-  const detector = await getDetector();
-  const maxSide = 960;
-  const scale = Math.min(1, maxSide / Math.max(source.width, source.height));
-  let input = source;
-  if (scale < 1 || source instanceof ImageData) {
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, Math.round(source.width * scale));
-    c.height = Math.max(1, Math.round(source.height * scale));
-    const ctx = c.getContext('2d');
-    if (source instanceof ImageData) {
-      const full = document.createElement('canvas');
-      full.width = source.width;
-      full.height = source.height;
-      full.getContext('2d').putImageData(source, 0, 0);
-      ctx.drawImage(full, 0, 0, c.width, c.height);
-    } else {
-      ctx.drawImage(source, 0, 0, c.width, c.height);
-    }
-    input = c;
+  const [short, full] = await Promise.all([getDetector('short'), getDetector('full').catch(() => null)]);
+  const src = toCanvas(source);
+  const { width, height } = src;
+  const whole = { x: 0, y: 0, w: width, h: height };
+  const run = (detector, rect) => {
+    const input = regionCanvas(src, rect);
+    return normalizeDetections(detector.detect(input), input.width, input.height, rect, width, height);
+  };
+  const found = run(short, whole);
+  if (full) {
+    for (const rect of [whole, ...tileRects(width, height)]) found.push(...run(full, rect));
   }
-  return normalizeDetections(detector.detect(input), input.width, input.height);
+  return mergeFaces(found);
 }
 
 // --- One-tap retouching --------------------------------------------------------
