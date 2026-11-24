@@ -34,6 +34,7 @@ import {
   computeHistogram,
 } from './engine/imagePipeline';
 import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
+import { cloneSkinOverride, createSkinOverride, getEffectiveSkinMask, paintSkinOverride } from './engine/skinMask';
 import { pastePatch } from './engine/patch';
 import { generateIdSheet, withPrintDpi } from './engine/idPhoto';
 import { createLiquifySession, liquifyDab } from './engine/liquify';
@@ -47,7 +48,9 @@ import {
   rasterize,
   readImage,
   resetFrameScroll,
+  skinRegionOverlay,
   transformAlphaMask,
+  transformSkinOverride,
   workingSizeOf,
 } from './engine/canvasUtils';
 import { renderCompositeCanvas, renderForExport } from './engine/renderComposite';
@@ -95,6 +98,9 @@ export default function App() {
   const workDataRef = useRef(null);
   const origCanvasRef = useRef(null);
   const cutoutAlphaRef = useRef(null);
+  // Manual corrections to the automatic skin mask ("Thêm/Bớt vùng da" brushes).
+  const skinOverrideRef = useRef(null);
+  const [skinOverlayCanvas, setSkinOverlayCanvas] = useState(null);
   const [originalCanvasState, setOriginalCanvasState] = useState(null);
   const [hasCutoutMask, setHasCutoutMask] = useState(false);
 
@@ -248,6 +254,7 @@ export default function App() {
               ? new Uint8ClampedArray(cutoutAlphaRef.current)
               : null
             : prevEntry.cutoutAlpha,
+        skinOverride: includePixels || !prevEntry ? cloneSkinOverride(skinOverrideRef.current) : prevEntry.skinOverride,
         adjustments: { ...(paramOverrides.adjustments ?? p.adjustments) },
         activePreset: paramOverrides.activePreset ?? p.activePreset,
         beauty: { ...(paramOverrides.beauty ?? p.beauty) },
@@ -302,6 +309,7 @@ export default function App() {
       origCanvas: origCanvasRef.current,
       cutoutAlpha: cutoutAlphaRef.current,
       hasCutoutMask: !!cutoutAlphaRef.current,
+      skinOverride: skinOverrideRef.current,
       eraseMask: eraseMaskRef.current,
       eraseMaskCanvas: eraseMaskCanvasRef.current,
       hasEraseMask,
@@ -343,6 +351,7 @@ export default function App() {
       updateGeometry(s.geometry || []);
       setOriginalCanvasState(s.origCanvas);
       cutoutAlphaRef.current = s.cutoutAlpha ? new Uint8ClampedArray(s.cutoutAlpha) : null;
+      skinOverrideRef.current = cloneSkinOverride(s.skinOverride);
       setHasCutoutMask(s.hasCutoutMask);
 
       eraseMaskRef.current = new Uint8Array(s.eraseMask);
@@ -400,6 +409,7 @@ export default function App() {
         updateGeometry([]);
         setOriginalCanvasState(c);
         cutoutAlphaRef.current = null;
+        skinOverrideRef.current = null;
         setHasCutoutMask(false);
 
         resetEraseMask(w, h);
@@ -480,6 +490,7 @@ export default function App() {
     workDataRef.current = null;
     origCanvasRef.current = null;
     cutoutAlphaRef.current = null;
+    skinOverrideRef.current = null;
     eraseMaskRef.current = null;
     eraseMaskCanvasRef.current = null;
     updateGeometry([]);
@@ -619,6 +630,7 @@ export default function App() {
         workData,
         origCanvas: origCanvasRef.current,
         cutoutAlpha: cutoutAlphaRef.current,
+        skinOverride: skinOverrideRef.current,
         adjustments,
         beauty,
         bgState,
@@ -634,6 +646,24 @@ export default function App() {
     return () => cancelAnimationFrame(rafId);
   }, [activeImageId, adjustments, beauty, bgState, textConfig, frameConfig, logoConfig, renderTick, hasCutoutMask]);
 
+  // Tint the skin region while a skin-region brush is selected.
+  const showSkinRegion = activeTab === 'portrait' && (brushTool === 'skin-add' || brushTool === 'skin-remove');
+  useEffect(() => {
+    const workData = workDataRef.current;
+    if (!showSkinRegion || !workData) {
+      setSkinOverlayCanvas(null);
+      return;
+    }
+    setSkinOverlayCanvas(skinRegionOverlay(getEffectiveSkinMask(workData, skinOverrideRef.current)));
+  }, [showSkinRegion, renderTick, activeImageId]);
+
+  const handleResetSkinRegion = () => {
+    if (!skinOverrideRef.current) return;
+    skinOverrideRef.current = null;
+    pushSnapshot(true);
+    setRenderTick((t) => t + 1);
+  };
+
   // Apply history entry helper
   const restoreHistoryEntry = useCallback(
     (entry) => {
@@ -645,6 +675,7 @@ export default function App() {
       origCanvasRef.current = entry.origCanvas;
       setOriginalCanvasState(entry.origCanvas);
       cutoutAlphaRef.current = entry.cutoutAlpha ? new Uint8ClampedArray(entry.cutoutAlpha) : null;
+      skinOverrideRef.current = cloneSkinOverride(entry.skinOverride);
       updateGeometry(entry.geometry || []);
       imageJobs.invalidate();
       setHasCutoutMask(!!entry.cutoutAlpha);
@@ -830,7 +861,10 @@ export default function App() {
     const workData = workDataRef.current;
     if (!workData) return false;
     const strength = brushStrength / 100;
-    if (activeTab === 'portrait' && brushTool !== 'none') {
+    if (activeTab === 'portrait' && (brushTool === 'skin-add' || brushTool === 'skin-remove')) {
+      if (!skinOverrideRef.current) skinOverrideRef.current = createSkinOverride(workData.width, workData.height);
+      paintSkinOverride(skinOverrideRef.current, x, y, brushSize, strength, brushTool === 'skin-add' ? 'add' : 'remove');
+    } else if (activeTab === 'portrait' && brushTool !== 'none') {
       let base = null;
       if (brushTool === 'smooth') {
         let session = smoothSessionRef.current;
@@ -1007,6 +1041,9 @@ export default function App() {
     if (cutoutAlphaRef.current && cutoutAlphaRef.current.length === oldW * oldH) {
       cutoutAlphaRef.current = transformAlphaMask(cutoutAlphaRef.current, oldW, oldH, operation);
     }
+    if (skinOverrideRef.current) {
+      skinOverrideRef.current = transformSkinOverride(skinOverrideRef.current, operation, nextWork.data.width, nextWork.data.height);
+    }
 
     resetEraseMask(nextWork.data.width, nextWork.data.height);
     setCloneSource(null);
@@ -1071,6 +1108,7 @@ export default function App() {
     cancelEraseJob();
     imageJobs.invalidate();
     workDataRef.current = cloneImageData(origDataRef.current);
+    skinOverrideRef.current = null;
     const nextAdj = { ...DEFAULT_ADJUSTMENTS };
     const nextBeauty = { ...DEFAULT_BEAUTY };
     const nextBg = { ...DEFAULT_BG_STATE };
@@ -1372,6 +1410,7 @@ export default function App() {
             onStrokeMove={handleStrokeMove}
             onStrokeEnd={handleStrokeEnd}
             eraseMaskCanvas={!inspecting && activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvasState : null}
+            skinOverlayCanvas={inspecting ? null : skinOverlayCanvas}
             patchActive={!inspecting && patchActive}
             patchRect={inspecting ? null : patchRect}
             patchOffset={patchOffset}
@@ -1474,6 +1513,7 @@ export default function App() {
           }}
           brushTool={brushTool}
           setBrushTool={setBrushTool}
+          onResetSkinRegion={handleResetSkinRegion}
           brushSize={brushSize}
           setBrushSize={setBrushSize}
           brushStrength={brushStrength}

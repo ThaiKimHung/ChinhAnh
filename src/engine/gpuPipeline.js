@@ -14,7 +14,7 @@
 // for the session).
 
 import { HIGHLIGHT_KNEE, HIGHLIGHT_SOFTNESS, SKIN_TEXTURE_KEEP, processImagePipeline } from './imagePipeline.js';
-import { SKIN_MASK_SCALE, getSkinMask } from './skinMask.js';
+import { SKIN_MASK_SCALE, getEffectiveSkinMask } from './skinMask.js';
 
 const VERTEX = `#version 300 es
 void main() {
@@ -412,7 +412,7 @@ function hasHslChanges(hsl) {
 const HSL_KEYS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'];
 
 /** GPU version of `processImagePipeline`; returns null when the GPU path cannot be used. */
-export function processImageGpu(srcImageData, adjustments, beauty) {
+export function processImageGpu(srcImageData, adjustments, beauty, skinOverride = null) {
   const e = getEngine();
   if (!e) return null;
   const { width, height } = srcImageData;
@@ -442,7 +442,7 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
   let skinSize = [1, 1];
   if (hasBeauty) {
-    const skin = getSkinMask(srcImageData);
+    const skin = getEffectiveSkinMask(srcImageData, skinOverride);
     gl.bindTexture(gl.TEXTURE_2D, e.skinTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, skin.width, skin.height, 0, gl.RED, gl.UNSIGNED_BYTE, skin.mask);
     skinSize = [skin.width, skin.height];
@@ -507,17 +507,17 @@ export function processImageGpu(srcImageData, adjustments, beauty) {
 let gpuDisabled = false;
 
 /** Beauty + color pipeline: GPU when available, CPU otherwise. Same output either way. */
-export function processImage(imageData, adjustments, beauty) {
+export function processImage(imageData, adjustments, beauty, skinOverride = null) {
   if (!gpuDisabled) {
     try {
-      const result = processImageGpu(imageData, adjustments, beauty);
+      const result = processImageGpu(imageData, adjustments, beauty, skinOverride);
       if (result) return result;
     } catch (error) {
       console.warn('WebGL pipeline failed, switching to CPU:', error);
       gpuDisabled = true;
     }
   }
-  return processImagePipeline(imageData, adjustments, beauty);
+  return processImagePipeline(imageData, adjustments, beauty, skinOverride);
 }
 
 /** For diagnostics: whether the GPU path is currently in use. */

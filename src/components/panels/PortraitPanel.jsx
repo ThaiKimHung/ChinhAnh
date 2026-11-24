@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Eraser, Paintbrush } from 'lucide-react';
+import { Sparkles, Eraser, Paintbrush, Plus, Minus } from 'lucide-react';
 import { DEFAULT_BEAUTY } from '../../engine/imagePipeline';
 import { SliderRow } from './controls';
 
@@ -9,6 +9,7 @@ export default function PortraitPanel({
   setBeauty,
   brushTool,
   setBrushTool,
+  onResetSkinRegion,
   brushSize,
   setBrushSize,
   brushStrength,
@@ -61,6 +62,47 @@ export default function PortraitPanel({
           onReset={() => setBeauty((b) => ({ ...b, skinRosy: 0 }))}
           onCommit={onCommitHistory}
         />
+      </div>
+
+      <div className="pt-4 border-t border-[#232836] space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Vùng làm đẹp da</h3>
+          <button
+            onClick={onResetSkinRegion}
+            className="text-[11px] text-slate-400 hover:text-amber-400 cursor-pointer"
+            title="Bỏ các chỉnh tay, dùng lại vùng da tự nhận diện"
+          >
+            Tự động
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          {[
+            { id: 'skin-add', label: 'Thêm vùng da', icon: Plus },
+            { id: 'skin-remove', label: 'Bớt vùng da', icon: Minus },
+          ].map((tool) => {
+            const Icon = tool.icon;
+            const active = brushTool === tool.id;
+            return (
+              <button
+                key={tool.id}
+                onClick={() => setBrushTool(active ? 'none' : tool.id)}
+                aria-pressed={active}
+                className={`py-2 px-1.5 rounded-lg border text-[11px] font-medium flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                  active
+                    ? 'bg-amber-500/15 border-amber-500 text-amber-300'
+                    : 'bg-[#1b1f29] border-[#262c3b] text-slate-300 hover:bg-[#222736]'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{tool.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Vùng được làm mịn, làm sáng và hồng hào hiện màu cam khi bật cọ. Tô thêm chỗ da bị bỏ sót (ảnh cháy sáng,
+          da trong bóng tối) hoặc bớt chỗ không phải da (tóc, áo, tường cùng màu).
+        </p>
       </div>
 
       <div className="pt-4 border-t border-[#232836] space-y-3.5">

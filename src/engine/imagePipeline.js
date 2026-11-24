@@ -1,5 +1,5 @@
 import { createLiquifySession, liquifyDab } from './liquify.js';
-import { getSkinMask, sampleSkinMask } from './skinMask.js';
+import { getEffectiveSkinMask, sampleSkinMask } from './skinMask.js';
 import { fitOverlay, wrapCaption } from './overlayLayout.js';
 
 export const DEFAULT_HSL = {
@@ -378,12 +378,12 @@ function rollOff(v, base) {
 /** Share of fine pore texture put back after skin smoothing (avoids a waxy look). */
 export const SKIN_TEXTURE_KEEP = 0.6;
 
-export function processImagePipeline(srcImageData, adjustments, beauty) {
+export function processImagePipeline(srcImageData, adjustments, beauty, skinOverride = null) {
   const { width, height, data: src } = srcImageData;
   const out = new Uint8ClampedArray(src.length);
 
   const hasBeauty = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
-  const skin = hasBeauty ? getSkinMask(srcImageData) : null;
+  const skin = hasBeauty ? getEffectiveSkinMask(srcImageData, skinOverride) : null;
   let blurred = null;
   let fineBlur = null;
   if (beauty.skinSmooth > 0) {

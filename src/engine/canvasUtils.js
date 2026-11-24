@@ -1,4 +1,5 @@
-import { isSupportedCanvasSize, transformImageCanvas } from './exportImage.js';
+import { getTransformedSize, isSupportedCanvasSize, transformImageCanvas } from './exportImage.js';
+import { SKIN_OVERRIDE_NEUTRAL, createSkinOverride } from './skinMask.js';
 
 export function cloneImageData(imgData) {
   return new ImageData(new Uint8ClampedArray(imgData.data), imgData.width, imgData.height);
@@ -90,4 +91,32 @@ export function resetFrameScroll(event) {
     el.scrollTop = 0;
     el.scrollLeft = 0;
   }
+}
+
+/**
+ * Applies a crop/rotate/flip/straighten to the skin-region override (kept on the
+ * 1/4-resolution grid) and fits it to the new image size.
+ */
+export function transformSkinOverride(override, operation, newWidth, newHeight) {
+  const moved = transformAlphaMask(override.data, override.width, override.height, operation);
+  const { width: movedW, height: movedH } = getTransformedSize({ width: override.width, height: override.height }, [operation]);
+  const next = createSkinOverride(newWidth, newHeight);
+  for (let y = 0; y < next.height; y++) {
+    for (let x = 0; x < next.width; x++) {
+      const sx = Math.min(movedW - 1, Math.floor(((x + 0.5) * movedW) / next.width));
+      const sy = Math.min(movedH - 1, Math.floor(((y + 0.5) * movedH) / next.height));
+      next.data[y * next.width + x] = moved[sy * movedW + sx] ?? SKIN_OVERRIDE_NEUTRAL;
+    }
+  }
+  return next;
+}
+
+/** Orange tint of the effective skin mask, drawn over the photo while painting the skin region. */
+export function skinRegionOverlay(skin) {
+  const canvas = createBlankCanvas(skin.width, skin.height);
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(skin.width, skin.height);
+  for (let p = 0; p < skin.mask.length; p++) img.data.set([255, 140, 40, Math.round(skin.mask[p] * 0.75)], p * 4);
+  ctx.putImageData(img, 0, 0);
+  return canvas;
 }

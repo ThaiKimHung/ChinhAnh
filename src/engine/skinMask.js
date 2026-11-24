@@ -184,3 +184,77 @@ export function getSkinMask(imageData) {
   cache.set(imageData, { signature, skin });
   return skin;
 }
+
+// --- Manual skin region ------------------------------------------------------
+// A per-photo override painted with the "Thêm vùng da" / "Bớt vùng da" brushes,
+// stored on the skin mask grid (1/4 resolution). 128 = automatic, 255 = always
+// skin, 0 = never skin; values in between blend toward those ends.
+
+export const SKIN_OVERRIDE_NEUTRAL = 128;
+
+/** Empty override (all automatic) for an image of width × height pixels. */
+export function createSkinOverride(width, height) {
+  const w = Math.ceil(width / SKIN_MASK_SCALE);
+  const h = Math.ceil(height / SKIN_MASK_SCALE);
+  return { width: w, height: h, data: new Uint8ClampedArray(w * h).fill(SKIN_OVERRIDE_NEUTRAL) };
+}
+
+export function isSkinOverrideEmpty(override) {
+  return !override || override.data.every((v) => v === SKIN_OVERRIDE_NEUTRAL);
+}
+
+/**
+ * Paints the override with a soft round brush centred at image pixel (cx, cy).
+ * mode: 'add' (mark as skin) or 'remove' (mark as not skin).
+ */
+export function paintSkinOverride(override, cx, cy, radius, strength, mode) {
+  const { width, height, data } = override;
+  const gx = cx / SKIN_MASK_SCALE - 0.5;
+  const gy = cy / SKIN_MASK_SCALE - 0.5;
+  const r = Math.max(1, radius / SKIN_MASK_SCALE);
+  const target = mode === 'add' ? 255 : 0;
+  for (let y = Math.max(0, Math.floor(gy - r)); y <= Math.min(height - 1, Math.ceil(gy + r)); y++) {
+    for (let x = Math.max(0, Math.floor(gx - r)); x <= Math.min(width - 1, Math.ceil(gx + r)); x++) {
+      const d2 = ((x - gx) ** 2 + (y - gy) ** 2) / (r * r);
+      if (d2 >= 1) continue;
+      const falloff = (1 - d2) ** 1.5 * Math.min(1, strength);
+      const i = y * width + x;
+      data[i] = Math.round(data[i] + (target - data[i]) * falloff);
+    }
+  }
+}
+
+/** Override value (0..255) at a grid cell of a mask that may have a different size. */
+function overrideAt(override, x, y, w, h) {
+  if (override.width === w && override.height === h) return override.data[y * w + x];
+  const ox = Math.min(override.width - 1, Math.floor(((x + 0.5) * override.width) / w));
+  const oy = Math.min(override.height - 1, Math.floor(((y + 0.5) * override.height) / h));
+  return override.data[oy * override.width + ox];
+}
+
+/**
+ * Combines the automatic mask with the painted override. Also handles an
+ * override painted on the working copy being applied at full export size.
+ */
+export function applySkinOverride(skin, override) {
+  if (isSkinOverrideEmpty(override)) return skin;
+  const mask = new Uint8Array(skin.mask.length);
+  for (let y = 0; y < skin.height; y++) {
+    for (let x = 0; x < skin.width; x++) {
+      const i = y * skin.width + x;
+      const auto = skin.mask[i];
+      const o = (overrideAt(override, x, y, skin.width, skin.height) - SKIN_OVERRIDE_NEUTRAL) / 127;
+      mask[i] = Math.round(o >= 0 ? auto + (255 - auto) * Math.min(1, o) : auto * (1 + Math.max(-1, o)));
+    }
+  }
+  return { ...skin, mask };
+}
+
+/** Skin mask of the photo with the user's painted corrections applied. */
+export function getEffectiveSkinMask(imageData, override) {
+  return applySkinOverride(getSkinMask(imageData), override);
+}
+
+export function cloneSkinOverride(override) {
+  return override ? { ...override, data: new Uint8ClampedArray(override.data) } : null;
+}

@@ -93,3 +93,29 @@ test('overexposed (washed-out) photos still get a skin mask', () => {
   assert.ok(sampleSkinMask(skin, 60, 60) > 0.6, `face ${sampleSkinMask(skin, 60, 60)}`);
   assert.ok(sampleSkinMask(skin, 100, 140) < 0.15, `backdrop ${sampleSkinMask(skin, 100, 140)}`);
 });
+
+test('the manual skin brush adds and removes regions on top of the automatic mask', async () => {
+  const { createSkinOverride, paintSkinOverride, applySkinOverride, isSkinOverrideEmpty } = await import('../src/engine/skinMask.js');
+  const img = scene(); // bokeh | skin | shirt, 120 × 90
+  const skin = computeSkinMask(img);
+  const override = createSkinOverride(120, 90);
+  assert.equal(isSkinOverrideEmpty(override), true);
+  assert.equal(applySkinOverride(skin, override), skin, 'an empty override changes nothing');
+  for (let k = 0; k < 4; k++) {
+    paintSkinOverride(override, 105, 45, 10, 1, 'add'); // the shirt is skin after all
+    paintSkinOverride(override, 60, 45, 10, 1, 'remove'); // and this part of the skin is not
+  }
+  const edited = applySkinOverride(skin, override);
+  assert.ok(sampleSkinMask(edited, 105, 45) > 0.9, `added ${sampleSkinMask(edited, 105, 45)}`);
+  assert.ok(sampleSkinMask(edited, 60, 45) < 0.1, `removed ${sampleSkinMask(edited, 60, 45)}`);
+  assert.ok(Math.abs(sampleSkinMask(edited, 75, 20) - sampleSkinMask(skin, 75, 20)) < 0.02, 'unpainted areas stay automatic');
+});
+
+test('an override painted on the working copy also applies at a larger export size', async () => {
+  const { createSkinOverride, paintSkinOverride, applySkinOverride } = await import('../src/engine/skinMask.js');
+  const small = createSkinOverride(120, 90);
+  for (let k = 0; k < 4; k++) paintSkinOverride(small, 105, 45, 10, 1, 'add');
+  const big = computeSkinMask(paint(360, 270, (x) => (x < 120 ? [180, 158, 150] : x < 240 ? SKIN : SHIRT)));
+  const edited = applySkinOverride(big, small);
+  assert.ok(sampleSkinMask(edited, 315, 135) > 0.9);
+});

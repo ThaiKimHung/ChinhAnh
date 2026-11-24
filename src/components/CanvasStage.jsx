@@ -45,6 +45,7 @@ export default function CanvasStage({
   onStrokeEnd,
   eraseMaskCanvas,
   eraseMaskVersion,
+  skinOverlayCanvas = null,
   cloneSource,
   pickingCloneSource,
   onPickCloneSource,
@@ -145,6 +146,13 @@ export default function CanvasStage({
       ctx.drawImage(displayCanvas, 0, 0);
     }
 
+    if (skinOverlayCanvas && !isComparingOriginal) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(skinOverlayCanvas, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
     if (eraseMaskCanvas && !isComparingOriginal) {
       ctx.save();
       ctx.globalAlpha = 0.52;
@@ -181,7 +189,7 @@ export default function CanvasStage({
       }
       ctx.restore();
     }
-  }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion, patchRect, patchOffset, patchFlip, zoom]);
+  }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion, skinOverlayCanvas, patchRect, patchOffset, patchFlip, zoom]);
 
   const clientToImageCoords = useCallback((clientX, clientY) => {
     const canvas = viewCanvasRef.current;
