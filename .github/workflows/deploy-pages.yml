@@ -30,7 +30,7 @@ jobs:
         env:
           # Served from https://<owner>.github.io/<repo>/
           BASE_PATH: /${{ github.event.repository.name }}/
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
