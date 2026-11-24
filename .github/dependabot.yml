@@ -1,0 +1,17 @@
+# Weekly update PRs for npm packages and GitHub Actions. Security fixes (for
+# example the zod advisory that arrives through @imgly/background-removal) open
+# their own PRs as soon as a compatible patched version exists.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
