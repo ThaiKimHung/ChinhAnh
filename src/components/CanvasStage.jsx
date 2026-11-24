@@ -3,6 +3,9 @@ import { Upload, Sparkles } from 'lucide-react';
 import { MAX_ZOOM, MIN_ZOOM, startPinch, updatePinch } from '../engine/pinch';
 import { normalizeRect } from '../engine/patch';
 import { resetFrameScroll } from '../engine/canvasUtils';
+import { cropPercentRatio, dragCropRect } from '../engine/cropDrag';
+import { drawStage } from '../engine/stageDraw';
+import { useResizeReport, useSpaceHeld } from '../hooks/useStageInput';
 
 const CROP_HANDLES = [
   { id: 'nw', cls: '-left-2 -top-2 cursor-nwse-resize' },
@@ -74,7 +77,6 @@ export default function CanvasStage({
   const [splitPos, setSplitPos] = useState(50);
   const [draggingSplit, setDraggingSplit] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
-  const [spaceDown, setSpaceDown] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [cursorPos, setCursorPos] = useState(null);
   const [cropDrag, setCropDrag] = useState(null);
@@ -86,109 +88,25 @@ export default function CanvasStage({
   const pinchRef = useRef(null);
   const patchDragRef = useRef(null);
 
-  useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage || !onViewportResize) return;
+  useResizeReport(stageRef, onViewportResize);
 
-    const reportSize = () => onViewportResize({ width: stage.clientWidth, height: stage.clientHeight });
-    const observer = new ResizeObserver(reportSize);
-    observer.observe(stage);
-    reportSize();
-    return () => observer.disconnect();
-  }, [onViewportResize]);
+  const stopPanning = useCallback(() => setIsPanning(false), []);
+  const spaceDown = useSpaceHeld(stopPanning);
 
-  useEffect(() => {
-    const onKeyDown = (e) => {
-      if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
-        setSpaceDown(true);
-      }
-    };
-    const onKeyUp = (e) => {
-      if (e.code === 'Space') {
-        setSpaceDown(false);
-        setIsPanning(false);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-    };
-  }, []);
-
-  // Draw displayCanvas (and optionally originalCanvas for split view / compare) onto viewCanvasRef
+  // The photo (or original / split view) plus the active tool's overlays.
   useEffect(() => {
     const canvas = viewCanvasRef.current;
     if (!canvas || !displayCanvas) return;
-
-    canvas.width = displayCanvas.width;
-    canvas.height = displayCanvas.height;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (isComparingOriginal && originalCanvas) {
-      ctx.drawImage(originalCanvas, 0, 0);
-      return;
-    }
-
-    if (splitView && originalCanvas) {
-      const splitX = Math.round((canvas.width * splitPos) / 100);
-      ctx.drawImage(displayCanvas, 0, 0);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, 0, splitX, canvas.height);
-      ctx.clip();
-      ctx.clearRect(0, 0, splitX, canvas.height);
-      ctx.drawImage(originalCanvas, 0, 0);
-      ctx.restore();
-    } else {
-      ctx.drawImage(displayCanvas, 0, 0);
-    }
-
-    if (skinOverlayCanvas && !isComparingOriginal) {
-      ctx.save();
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(skinOverlayCanvas, 0, 0, canvas.width, canvas.height);
-      ctx.restore();
-    }
-
-    if (eraseMaskCanvas && !isComparingOriginal) {
-      ctx.save();
-      ctx.globalAlpha = 0.52;
-      ctx.drawImage(eraseMaskCanvas, 0, 0);
-      ctx.restore();
-    }
-
-    // Cut & paste: preview the moved copy, then outline source (dashed) and target.
-    if (patchRect && !isComparingOriginal) {
-      const { x, y, w, h } = patchRect;
-      const tx = x + patchOffset.dx;
-      const ty = y + patchOffset.dy;
-      const moved = patchOffset.dx !== 0 || patchOffset.dy !== 0;
-      if (moved) {
-        ctx.save();
-        if (patchFlip) {
-          ctx.translate(tx * 2 + w, 0);
-          ctx.scale(-1, 1);
-        }
-        ctx.drawImage(displayCanvas, x, y, w, h, tx, ty, w, h);
-        ctx.restore();
-      }
-      const unit = 1 / Math.max(0.05, zoom);
-      ctx.save();
-      ctx.lineWidth = 1.5 * unit;
-      ctx.setLineDash([6 * unit, 4 * unit]);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      ctx.strokeRect(x, y, w, h);
-      if (moved) {
-        ctx.setLineDash([]);
-        ctx.lineWidth = 2 * unit;
-        ctx.strokeStyle = '#f59e0b';
-        ctx.strokeRect(tx, ty, w, h);
-      }
-      ctx.restore();
-    }
+    drawStage(canvas, {
+      display: displayCanvas,
+      original: originalCanvas,
+      compare: isComparingOriginal,
+      splitAt: splitView ? splitPos : null,
+      skinOverlay: skinOverlayCanvas,
+      eraseMask: eraseMaskCanvas,
+      patch: patchRect ? { rect: patchRect, offset: patchOffset, flip: patchFlip } : null,
+      zoom,
+    });
   }, [displayCanvas, originalCanvas, splitView, splitPos, isComparingOriginal, eraseMaskCanvas, eraseMaskVersion, skinOverlayCanvas, patchRect, patchOffset, patchFlip, zoom]);
 
   const clientToImageCoords = useCallback((clientX, clientY) => {
@@ -341,72 +259,8 @@ export default function CanvasStage({
       const rect = viewCanvasRef.current.getBoundingClientRect();
       const dxPct = ((e.clientX - cropDrag.startX) / rect.width) * 100;
       const dyPct = ((e.clientY - cropDrag.startY) / rect.height) * 100;
-      const orig = cropDrag.origRect;
-      let { x, y, w, h } = orig;
-      const minSize = 8;
-
-      if (cropDrag.type === 'move') {
-        x = Math.min(100 - w, Math.max(0, orig.x + dxPct));
-        y = Math.min(100 - h, Math.max(0, orig.y + dyPct));
-        setCropRect({ x, y, w, h });
-        return;
-      }
-
-      const right0 = orig.x + orig.w;
-      const bot0 = orig.y + orig.h;
-      const dir = cropDrag.type;
-      const locked = cropAspect !== 'free' && imageSize?.width && imageSize?.height;
-      let pctRatio = null;
-      if (locked) {
-        const [aw, ah] = cropAspect.split(':').map(Number);
-        const targetRatio = aw / ah;
-        const imgRatio = imageSize.width / imageSize.height;
-        pctRatio = imgRatio / targetRatio; // hPct = wPct * pctRatio
-      }
-
-      if (!locked) {
-        if (dir.includes('e')) {
-          w = Math.min(100 - orig.x, Math.max(minSize, orig.w + dxPct));
-        }
-        if (dir.includes('s')) {
-          h = Math.min(100 - orig.y, Math.max(minSize, orig.h + dyPct));
-        }
-        if (dir.includes('w')) {
-          const newX = Math.max(0, Math.min(right0 - minSize, orig.x + dxPct));
-          w = right0 - newX;
-          x = newX;
-        }
-        if (dir.includes('n')) {
-          const newY = Math.max(0, Math.min(bot0 - minSize, orig.y + dyPct));
-          h = bot0 - newY;
-          y = newY;
-        }
-      } else {
-        // Aspect-locked resizing from any corner or edge
-        const anchorX = dir.includes('w') ? right0 : orig.x;
-        const anchorY = dir.includes('n') ? bot0 : orig.y;
-        const maxW = dir.includes('w') ? anchorX : 100 - anchorX;
-        const maxH = dir.includes('n') ? anchorY : 100 - anchorY;
-        const maxWFromH = maxH / pctRatio;
-        const effectiveMaxW = Math.min(maxW, maxWFromH);
-
-        let rawW = orig.w;
-        if (dir.includes('e')) rawW = orig.w + dxPct;
-        else if (dir.includes('w')) rawW = orig.w - dxPct;
-        else if (dir.includes('s')) rawW = (orig.h + dyPct) / pctRatio;
-        else if (dir.includes('n')) rawW = (orig.h - dyPct) / pctRatio;
-
-        w = Math.min(effectiveMaxW, Math.max(minSize, rawW));
-        h = w * pctRatio;
-        if (h < minSize) {
-          h = minSize;
-          w = h / pctRatio;
-        }
-        x = dir.includes('w') ? anchorX - w : anchorX;
-        y = dir.includes('n') ? anchorY - h : anchorY;
-      }
-
-      setCropRect({ x, y, w, h });
+      const ratio = cropDrag.type === 'move' ? null : cropPercentRatio(cropAspect, imageSize?.width, imageSize?.height);
+      setCropRect(dragCropRect(cropDrag.origRect, cropDrag.type, dxPct, dyPct, ratio));
       return;
     }
 

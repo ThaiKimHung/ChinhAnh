@@ -8,7 +8,6 @@ import Filmstrip from './components/Filmstrip';
 import samplePortraitUrl from './assets/studio-portrait-sample.jpg';
 import { createImageJobGuard } from './engine/imageJobs';
 import { advanceBrushStroke, createBrushStroke, finishBrushStroke } from './engine/brushStroke';
-import { inpaintInWorker } from './engine/inpaintJob';
 import { applyStyleToSession, HISTORY_MAX_ENTRIES } from './engine/history';
 import {
   createZip,
@@ -33,17 +32,14 @@ import {
   computeAutoEnhance,
   computeHistogram,
 } from './engine/imagePipeline';
-import { applyCloneStampStroke, dilateMask } from './engine/inpaint';
+import { applyCloneStampStroke } from './engine/inpaint';
 import { cloneSkinOverride, createSkinOverride, getEffectiveSkinMask, paintSkinOverride } from './engine/skinMask';
-import { pastePatch } from './engine/patch';
 import { generateIdSheet, withPrintDpi } from './engine/idPhoto';
 import { createLiquifySession, liquifyDab } from './engine/liquify';
 import { detectFaces, eyeEnlargeDabs, faceSlimDabs } from './engine/faces';
 import { IMAGE_FILE_ACCEPT, isHeicFile, isImageFile, toEditableImageFile } from './engine/imageFiles';
 import {
-  canvasToBlob,
   cloneImageData,
-  createBlankCanvas,
   imageDataToCanvas,
   imageSizeOf,
   rasterize,
@@ -58,6 +54,11 @@ import { renderCompositeCanvas, renderForExport } from './engine/renderComposite
 import { useEditorHistory } from './hooks/useEditorHistory';
 import { useCustomPresets } from './hooks/useCustomPresets';
 import { useEditorShortcuts } from './hooks/useEditorShortcuts';
+import { useViewportZoom } from './hooks/useViewportZoom';
+import { useFaceDetection } from './hooks/useFaceDetection';
+import { useEraseMask } from './hooks/useEraseMask';
+import { usePatchTool } from './hooks/usePatchTool';
+import { useBackgroundRemoval } from './hooks/useBackgroundRemoval';
 import {
   DRAFT_MESSAGES,
   DRAFT_WARNING_STATES,
@@ -65,8 +66,6 @@ import {
   useDraftRestore,
   useDraftState,
 } from './hooks/useDraftPersistence';
-
-const NO_OFFSET = { dx: 0, dy: 0 };
 
 function queuedStyles(value) {
   if (Array.isArray(value)) return value;
@@ -85,7 +84,7 @@ export default function App() {
   const [workMaxDim, setWorkMaxDim] = useState(1600);
   const sessionsRef = useRef({});
   const pendingStyleByIdRef = useRef({});
-  const imageJobs = useRef(createImageJobGuard()).current;
+  const [imageJobs] = useState(createImageJobGuard);
   const loadedImageIdRef = useRef(null);
   const geometryRef = useRef([]);
   const [geometry, setGeometry] = useState([]);
@@ -101,7 +100,6 @@ export default function App() {
   const cutoutAlphaRef = useRef(null);
   // Manual corrections to the automatic skin mask ("Thêm/Bớt vùng da" brushes).
   const skinOverrideRef = useRef(null);
-  const facesRef = useRef(null); // latest detected faces, for sessions and exports
   const [skinOverlayCanvas, setSkinOverlayCanvas] = useState(null);
   const [originalCanvasState, setOriginalCanvasState] = useState(null);
   const [hasCutoutMask, setHasCutoutMask] = useState(false);
@@ -117,15 +115,13 @@ export default function App() {
 
   // UI & Tool states
   const [activeTab, setActiveTab] = useState('color');
-  const [zoom, setZoom] = useState(0.65);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [splitView, setSplitView] = useState(false);
   const [isComparingOriginal, setIsComparingOriginal] = useState(false);
   const [inspectionBackground, setInspectionBackground] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
-  const viewportRef = useRef(null);
-  const fitActiveRef = useRef(true);
+  const { zoom, pan, setPan, fitZoomToScreen, changeZoom, zoomAroundCentre, handleViewportResize } =
+    useViewportZoom(workDataRef);
 
   // Adjustments, Beauty & Presets
   const [activePreset, setActivePreset] = useState('original');
@@ -151,28 +147,15 @@ export default function App() {
 
   // Object Removal (Magic Eraser + Clone Stamp)
   const [eraseMode, setEraseMode] = useState('magic');
-  const eraseMaskRef = useRef(null);
-  const eraseMaskCanvasRef = useRef(null);
-  const [eraseMaskCanvasState, setEraseMaskCanvasState] = useState(null);
-  const [eraseMaskVersion, setEraseMaskVersion] = useState(0);
-  const [hasEraseMask, setHasEraseMask] = useState(false);
-  const [eraseProcessing, setEraseProcessing] = useState(false);
-  const eraseJobRef = useRef(null);
   const [cloneSource, setCloneSource] = useState(null);
   const [pickingCloneSource, setPickingCloneSource] = useState(false);
   const cloneOffsetRef = useRef(null);
   const [cloneToneMatch, setCloneToneMatch] = useState(true);
 
   // Cut & paste (patch) tool: a rectangle of the photo moved over another spot
-  const [patchSelection, setPatchSelection] = useState(null); // { key, rect, offset, flip }
-  const [patchFeather, setPatchFeather] = useState(16);
-  const [patchToneMatch, setPatchToneMatch] = useState(true);
 
   // Background removal & refinement brush
   const [bgState, setBgState] = useState({ ...DEFAULT_BG_STATE });
-  const [bgProcessing, setBgProcessing] = useState(false);
-  const [bgProgress, setBgProgress] = useState('');
-  const bgJobRef = useRef(null);
   const [bgMaskBrush, setBgMaskBrush] = useState('none'); // 'none' | 'keep' | 'erase'
 
   // Crop & Straighten
@@ -187,29 +170,19 @@ export default function App() {
   const [logoConfig, setLogoConfig] = useState({ ...DEFAULT_LOGO });
   const [editorNotice, setEditorNotice] = useState('');
 
-  const cancelEraseJob = useCallback(() => {
-    if (!eraseJobRef.current) return;
-    const { controller } = eraseJobRef.current;
-    eraseJobRef.current = null;
-    controller.abort();
-    setEraseProcessing(false);
-  }, []);
-
-  useEffect(() => () => eraseJobRef.current?.controller.abort(), []);
+  // Faces for the one-tap retouch, skin tone and ID crop; detected while a face feature is in use.
+  const beautyInUse = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
+  const { faces: currentFaces, status: faceStatus, facesRef } = useFaceDetection({
+    imageId: activeImageId,
+    imageSize,
+    geometryLength: geometry.length,
+    wanted: activeTab === 'portrait' || activeTab === 'liquify' || beautyInUse,
+    workDataRef,
+  });
 
   const updateGeometry = useCallback((operations) => {
     geometryRef.current = operations;
     setGeometry(operations);
-  }, []);
-
-  /** Replaces the magic-eraser mask with an empty one of the given size. */
-  const resetEraseMask = useCallback((width, height) => {
-    const mc = createBlankCanvas(width, height);
-    eraseMaskCanvasRef.current = mc;
-    setEraseMaskCanvasState(mc);
-    eraseMaskRef.current = new Uint8Array(width * height);
-    setHasEraseMask(false);
-    setEraseMaskVersion((v) => v + 1);
   }, []);
 
   // Latest params ref so async/event commits never read stale state
@@ -272,35 +245,59 @@ export default function App() {
     [history, markDraftDirty]
   );
 
-  const fitZoomToScreen = useCallback((w, h) => {
-    fitActiveRef.current = true;
-    const viewport = viewportRef.current;
-    if (viewport?.width && viewport?.height) {
-      const availW = Math.max(1, viewport.width - 32);
-      const availH = Math.max(1, viewport.height - 32);
-      setZoom(Math.min(availW / w, availH / h, 1));
-    }
-    setPan({ x: 0, y: 0 });
-  }, []);
-
-  const handleViewportResize = useCallback((viewport) => {
-    viewportRef.current = viewport;
-    const data = workDataRef.current;
-    if (data && fitActiveRef.current) fitZoomToScreen(data.width, data.height);
-  }, [fitZoomToScreen]);
-
-  const changeZoom = useCallback((value) => {
-    fitActiveRef.current = false;
-    setZoom(value);
-  }, []);
-
   const inspecting = inspectionBackground !== null;
   const handleZoomFit = () => imageSize && fitZoomToScreen(imageSize.width, imageSize.height);
-  const handleInspectionZoom = (level) => {
-    const ratio = level / zoom;
-    setPan(({ x, y }) => ({ x: x * ratio, y: y * ratio }));
-    changeZoom(level);
-  };
+
+  /** After pixels in workDataRef changed: drop stale jobs, record history, re-render. */
+  const commitPixelEdit = useCallback(() => {
+    imageJobs.invalidate();
+    pushSnapshot(true);
+    setRenderTick((t) => t + 1);
+  }, [imageJobs, pushSnapshot]);
+
+  const handleInpainted = useCallback((pixels) => {
+    workDataRef.current = pixels;
+    commitPixelEdit();
+  }, [commitPixelEdit]);
+
+  const {
+    maskCanvas: eraseMaskCanvas,
+    version: eraseMaskVersion,
+    hasMask: hasEraseMask,
+    processing: eraseProcessing,
+    cancelJob: cancelEraseJob,
+    reset: resetEraseMask,
+    drop: dropEraseMask,
+    capture: captureEraseMask,
+    restore: restoreEraseMask,
+    paintSegment: paintEraseMaskSegment,
+    clear: handleClearEraseMask,
+    apply: handleApplyEraseMask,
+  } = useEraseMask({
+    brushSize,
+    workDataRef,
+    imageJobs,
+    markDraftDirty,
+    onInpainted: handleInpainted,
+    onNotice: setEditorNotice,
+  });
+
+  const handleCutoutMask = useCallback((alpha) => {
+    cutoutAlphaRef.current = alpha;
+    setHasCutoutMask(true);
+    const current = latestParamsRef.current.bgState;
+    const nextBg = { ...current, mode: current.mode === 'original' ? 'transparent' : current.mode };
+    setBgState(nextBg);
+    pushSnapshot(true, { bgState: nextBg });
+    setRenderTick((t) => t + 1);
+  }, [pushSnapshot]);
+
+  const {
+    processing: bgProcessing,
+    progress: bgProgress,
+    run: handleRunAiBgRemoval,
+    noteImageSwitch: noteBgImageSwitch,
+  } = useBackgroundRemoval({ workDataRef, imageJobs, onMask: handleCutoutMask, onError: setEditorNotice });
 
   const captureCurrentSession = useCallback(() => {
     if (!workDataRef.current) return null;
@@ -313,9 +310,7 @@ export default function App() {
       hasCutoutMask: !!cutoutAlphaRef.current,
       skinOverride: skinOverrideRef.current,
       faces: facesRef.current,
-      eraseMask: eraseMaskRef.current,
-      eraseMaskCanvas: eraseMaskCanvasRef.current,
-      hasEraseMask,
+      ...captureEraseMask(),
       cloneSource,
       imageSize: p.imageSize,
       sourceSize: p.sourceSize,
@@ -329,7 +324,7 @@ export default function App() {
       ...history.snapshot(),
       geometry: geometryRef.current,
     };
-  }, [hasEraseMask, cloneSource, history]);
+  }, [captureEraseMask, cloneSource, facesRef, history]);
 
   const saveCurrentSession = useCallback((imgId) => {
     if (!imgId || loadedImageIdRef.current !== imgId) return;
@@ -357,13 +352,7 @@ export default function App() {
       skinOverrideRef.current = cloneSkinOverride(s.skinOverride);
       setHasCutoutMask(s.hasCutoutMask);
 
-      eraseMaskRef.current = new Uint8Array(s.eraseMask);
-      const maskCanvas = createBlankCanvas(s.workData.width, s.workData.height);
-      if (s.eraseMaskCanvas) maskCanvas.getContext('2d').drawImage(s.eraseMaskCanvas, 0, 0);
-      eraseMaskCanvasRef.current = maskCanvas;
-      setEraseMaskCanvasState(maskCanvas);
-      setHasEraseMask(s.hasEraseMask);
-      setEraseMaskVersion((v) => v + 1);
+      restoreEraseMask(s, s.workData.width, s.workData.height);
       setCloneSource(s.cloneSource);
       setPickingCloneSource(false);
 
@@ -388,7 +377,7 @@ export default function App() {
       setRenderTick((t) => t + 1);
       return true;
     },
-    [fitZoomToScreen, history, updateGeometry]
+    [fitZoomToScreen, history, restoreEraseMask, updateGeometry]
   );
 
   const loadImageFromUrl = useCallback(
@@ -484,7 +473,7 @@ export default function App() {
     setActiveImageId(item?.id ?? null);
     setEditorNotice('');
     setImageLoadStatus('');
-    setBgProgress(bgJobRef.current ? 'Đang hoàn tất ảnh trước…' : '');
+    noteBgImageSwitch();
     setDisplayCanvas(null);
     setHistogram(null);
     if (item && restoreSession(item.id)) return;
@@ -494,8 +483,7 @@ export default function App() {
     origCanvasRef.current = null;
     cutoutAlphaRef.current = null;
     skinOverrideRef.current = null;
-    eraseMaskRef.current = null;
-    eraseMaskCanvasRef.current = null;
+    dropEraseMask();
     updateGeometry([]);
     history.reset();
     setOriginalCanvasState(null);
@@ -504,9 +492,8 @@ export default function App() {
     setImageSize(null);
     setSourceSize(null);
     setHasCutoutMask(false);
-    setHasEraseMask(false);
     if (item) void loadImageFromUrl(item.url, item.id, maxDimension, persistOnLoad);
-  }, [cancelEraseJob, history, imageJobs, loadImageFromUrl, restoreSession, updateGeometry]);
+  }, [cancelEraseJob, dropEraseMask, history, imageJobs, loadImageFromUrl, noteBgImageSwitch, restoreSession, updateGeometry]);
 
   const handleSelectImage = useCallback(
     (item) => {
@@ -622,31 +609,6 @@ export default function App() {
     ],
   });
 
-  // Faces (normalised boxes) for the current photo and crop. Detected when a
-  // face feature is in use; the skin tone then comes from the faces.
-  const [faceState, setFaceState] = useState({ key: null, faces: null, error: false });
-  const faceKey = imageSize ? `${activeImageId}:${imageSize.width}x${imageSize.height}:${geometry.length}` : null;
-  const facesKnown = faceKey !== null && faceState.key === faceKey;
-  const currentFaces = facesKnown ? faceState.faces : null;
-  const beautyInUse = beauty.skinSmooth > 0 || beauty.skinBrighten > 0 || beauty.skinRosy > 0;
-  const wantFaces = faceKey !== null && (activeTab === 'portrait' || activeTab === 'liquify' || beautyInUse);
-  const faceStatus = !faceKey ? 'idle' : facesKnown ? (faceState.error ? 'error' : currentFaces?.length ? 'found' : 'none') : wantFaces ? 'detecting' : 'idle';
-  useEffect(() => {
-    const workData = workDataRef.current;
-    if (!wantFaces || facesKnown || !workData) return;
-    let cancelled = false;
-    detectFaces(workData)
-      .then((faces) => !cancelled && setFaceState({ key: faceKey, faces, error: false }))
-      .catch(() => !cancelled && setFaceState({ key: faceKey, faces: [], error: true }));
-    return () => {
-      cancelled = true;
-    };
-  }, [faceKey, facesKnown, wantFaces]);
-
-  useEffect(() => {
-    facesRef.current = currentFaces;
-  }, [currentFaces]);
-
   // Re-render pipeline throttled with requestAnimationFrame
   useEffect(() => {
     const workData = workDataRef.current;
@@ -748,143 +710,18 @@ export default function App() {
 
   // Brush / Liquify / Erase / Background Mask strokes
   const patchActive = activeTab === 'erase' && eraseMode === 'patch';
-  // A selection only belongs to the photo, size and tool it was made with.
-  const patchKey = patchActive && imageSize ? `${activeImageId}:${imageSize.width}x${imageSize.height}` : null;
-  const livePatch = patchKey && patchSelection?.key === patchKey ? patchSelection : null;
-  const patchRect = livePatch?.rect ?? null;
-  const patchOffset = livePatch?.offset ?? NO_OFFSET;
-  const patchFlip = livePatch?.flip ?? false;
+  const patch = usePatchTool({
+    key: patchActive && imageSize ? `${activeImageId}:${imageSize.width}x${imageSize.height}` : null,
+    workDataRef,
+    keyboardEnabled: patchActive && !inspecting,
+    beforePaste: cancelEraseJob,
+    onPasted: commitPixelEdit,
+  });
   const isBrushActive =
     (activeTab === 'portrait' && brushTool !== 'none') ||
     activeTab === 'liquify' ||
     (activeTab === 'erase' && !patchActive) ||
     (activeTab === 'background' && hasCutoutMask && bgState.mode !== 'original' && bgMaskBrush !== 'none');
-
-  const cancelPatch = useCallback(() => setPatchSelection(null), []);
-  const setPatchFlip = (update) =>
-    setPatchSelection((p) => (p ? { ...p, flip: typeof update === 'function' ? update(p.flip) : update } : p));
-
-  const handleApplyPatch = useCallback(() => {
-    const workData = workDataRef.current;
-    if (!workData || !patchRect || (patchOffset.dx === 0 && patchOffset.dy === 0)) return;
-    cancelEraseJob();
-    const changed = pastePatch(workData, patchRect, patchOffset.dx, patchOffset.dy, {
-      feather: patchFeather,
-      toneMatch: patchToneMatch,
-      flip: patchFlip,
-    });
-    cancelPatch();
-    if (!changed) return;
-    imageJobs.invalidate();
-    pushSnapshot(true);
-    setRenderTick((t) => t + 1);
-  }, [cancelEraseJob, cancelPatch, imageJobs, patchFeather, patchFlip, patchOffset, patchRect, patchToneMatch, pushSnapshot]);
-
-  useEffect(() => {
-    if (inspecting || !patchActive || !patchRect) return;
-    const onKey = (e) => {
-      if (e.target instanceof Element && e.target.closest('input, textarea, select, dialog[open]')) return;
-      if (e.key === 'Enter') {
-        if (e.target instanceof Element && e.target.closest('button')) return;
-        e.preventDefault();
-        handleApplyPatch();
-      } else if (e.key === 'Escape') {
-        cancelPatch();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [cancelPatch, handleApplyPatch, inspecting, patchActive, patchRect]);
-
-  const paintEraseMaskSegment = useCallback(
-    (x0, y0, x1, y1) => {
-      const mask = eraseMaskRef.current;
-      const mc = eraseMaskCanvasRef.current;
-      if (!mask || !mc) return;
-      markDraftDirty();
-      const w = mc.width;
-      const h = mc.height;
-      const ctx = mc.getContext('2d');
-      ctx.strokeStyle = '#ef4444';
-      ctx.fillStyle = '#ef4444';
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = brushSize * 2;
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x1, y1, brushSize, 0, Math.PI * 2);
-      ctx.fill();
-
-      const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / Math.max(2, brushSize * 0.35)));
-      const r = brushSize;
-      const r2 = r * r;
-      for (let s = 0; s <= steps; s++) {
-        const cx = x0 + ((x1 - x0) * s) / steps;
-        const cy = y0 + ((y1 - y0) * s) / steps;
-        const minX = Math.max(0, Math.floor(cx - r));
-        const maxX = Math.min(w - 1, Math.ceil(cx + r));
-        const minY = Math.max(0, Math.floor(cy - r));
-        const maxY = Math.min(h - 1, Math.ceil(cy + r));
-        for (let y = minY; y <= maxY; y++) {
-          for (let x = minX; x <= maxX; x++) {
-            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r2) {
-              mask[y * w + x] = 1;
-            }
-          }
-        }
-      }
-      setHasEraseMask(true);
-      setEraseMaskVersion((v) => v + 1);
-    },
-    [brushSize, markDraftDirty]
-  );
-
-  const handleClearEraseMask = useCallback(() => {
-    markDraftDirty();
-    if (eraseMaskRef.current) eraseMaskRef.current.fill(0);
-    if (eraseMaskCanvasRef.current) {
-      const mc = eraseMaskCanvasRef.current;
-      mc.getContext('2d').clearRect(0, 0, mc.width, mc.height);
-    }
-    setHasEraseMask(false);
-    setEraseMaskVersion((v) => v + 1);
-  }, [markDraftDirty]);
-
-  const handleApplyEraseMask = useCallback(async () => {
-    const source = workDataRef.current;
-    const mask = eraseMaskRef.current;
-    if (!source || !mask || eraseJobRef.current) return;
-    const job = { token: imageJobs.start(), controller: new AbortController() };
-    eraseJobRef.current = job;
-    setEraseProcessing(true);
-    setEditorNotice('');
-    try {
-      const grow = Math.max(1, Math.round(Math.min(source.width, source.height) / 700));
-      const pixels = await inpaintInWorker(source, dilateMask(mask, source.width, source.height, grow), job.controller.signal);
-      if (eraseJobRef.current !== job || !imageJobs.isCurrent(job.token)) return;
-      if (!pixels) {
-        setEditorNotice('Chưa đủ vùng nền để lấp chỗ đã tô. Hãy chừa nền xung quanh và thử vùng nhỏ hơn.');
-        return;
-      }
-      workDataRef.current = new ImageData(pixels, source.width, source.height);
-      imageJobs.invalidate();
-      pushSnapshot(true);
-      handleClearEraseMask();
-      setRenderTick((t) => t + 1);
-    } catch {
-      if (eraseJobRef.current === job && imageJobs.isCurrent(job.token) && !job.controller.signal.aborted) {
-        setEditorNotice('Không thể xử lý vùng đã tô. Hãy thử với vùng nhỏ hơn.');
-      }
-    } finally {
-      if (eraseJobRef.current === job) {
-        eraseJobRef.current = null;
-        setEraseProcessing(false);
-      }
-    }
-  }, [handleClearEraseMask, imageJobs, pushSnapshot]);
 
   /** The liquify displacement session for the current pixels (a new one after any other pixel edit). */
   const ensureLiquifySession = useCallback((workData) => {
@@ -1004,61 +841,6 @@ export default function App() {
     }
     brushEditedRef.current = false;
   }, [activeTab, applyBrushDab, brushTool, liquifyMode, pushSnapshot, updateBrushPreview]);
-
-  // AI Background Removal via @imgly/background-removal (runs on current workData so liquify/erase stay aligned)
-  const handleRunAiBgRemoval = async () => {
-    if (!workDataRef.current || bgJobRef.current) return;
-    const job = imageJobs.start();
-    bgJobRef.current = job;
-    setBgProcessing(true);
-    setBgProgress('Đang tải AI...');
-    setEditorNotice('');
-    let resultUrl;
-    try {
-      const source = imageDataToCanvas(workDataRef.current);
-      const blob = await canvasToBlob(source, 'image/png');
-      const { removeBackground } = await import('@imgly/background-removal');
-      if (!imageJobs.isCurrent(job)) return;
-      const resultBlob = await removeBackground(blob, {
-        progress: (_key, current, total) => {
-          if (imageJobs.isCurrent(job) && total > 0) {
-            const pct = Math.min(100, Math.round((current / total) * 100));
-            setBgProgress(`${pct}%`);
-          }
-        },
-      });
-
-      if (!imageJobs.isCurrent(job)) return;
-      resultUrl = URL.createObjectURL(resultBlob);
-      const img = await readImage(resultUrl);
-      if (!imageJobs.isCurrent(job)) return;
-      const { width, height } = source;
-      const maskData = rasterize(img, width, height).data.data;
-      const alpha = new Uint8ClampedArray(width * height);
-      for (let i = 0, p = 0; i < maskData.length; i += 4, p++) {
-        alpha[p] = maskData[i + 3];
-      }
-      cutoutAlphaRef.current = alpha;
-      setHasCutoutMask(true);
-      const current = latestParamsRef.current.bgState;
-      const nextBg = { ...current, mode: current.mode === 'original' ? 'transparent' : current.mode };
-      setBgState(nextBg);
-      pushSnapshot(true, { bgState: nextBg });
-      setRenderTick((t) => t + 1);
-    } catch (err) {
-      if (imageJobs.isCurrent(job)) {
-        console.error('AI BG Removal failed:', err);
-        setEditorNotice('Không thể tách nền. Hãy kiểm tra kết nối mạng để tải mô hình AI rồi thử lại.');
-      }
-    } finally {
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      if (bgJobRef.current === job) {
-        bgJobRef.current = null;
-        setBgProcessing(false);
-        setBgProgress('');
-      }
-    }
-  };
 
   // Rotate, Flip, Straighten & Crop
   const applyTransformCanvas = (operation) => {
@@ -1451,22 +1233,20 @@ export default function App() {
             isComparingOriginal={isComparingOriginal}
             inspectionBackground={inspectionBackground}
             onInspectionBackground={setInspectionBackground}
-            onInspectionZoom={handleInspectionZoom}
+            onInspectionZoom={zoomAroundCentre}
             onZoomFit={handleZoomFit}
             isBrushActive={!inspecting && isBrushActive}
             brushSize={brushSize}
             onStrokeStart={handleStrokeStart}
             onStrokeMove={handleStrokeMove}
             onStrokeEnd={handleStrokeEnd}
-            eraseMaskCanvas={!inspecting && activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvasState : null}
+            eraseMaskCanvas={!inspecting && activeTab === 'erase' && eraseMode === 'magic' ? eraseMaskCanvas : null}
             skinOverlayCanvas={inspecting ? null : skinOverlayCanvas}
             patchActive={!inspecting && patchActive}
-            patchRect={inspecting ? null : patchRect}
-            patchOffset={patchOffset}
-            patchFlip={patchFlip}
-            onPatchChange={(rect, offset) =>
-              setPatchSelection(rect ? { key: patchKey, rect, offset, flip: livePatch?.flip ?? false } : null)
-            }
+            patchRect={inspecting ? null : patch.rect}
+            patchOffset={patch.offset}
+            patchFlip={patch.flip}
+            onPatchChange={patch.change}
             eraseMaskVersion={eraseMaskVersion}
             cloneSource={!inspecting && activeTab === 'erase' && eraseMode === 'clone' ? cloneSource : null}
             pickingCloneSource={!inspecting && activeTab === 'erase' && eraseMode === 'clone' && pickingCloneSource}
@@ -1602,16 +1382,16 @@ export default function App() {
           setPickingCloneSource={setPickingCloneSource}
           cloneToneMatch={cloneToneMatch}
           setCloneToneMatch={setCloneToneMatch}
-          patchRect={patchRect}
-          patchOffset={patchOffset}
-          patchFeather={patchFeather}
-          setPatchFeather={setPatchFeather}
-          patchToneMatch={patchToneMatch}
-          setPatchToneMatch={setPatchToneMatch}
-          patchFlip={patchFlip}
-          setPatchFlip={setPatchFlip}
-          onApplyPatch={handleApplyPatch}
-          onCancelPatch={cancelPatch}
+          patchRect={patch.rect}
+          patchOffset={patch.offset}
+          patchFeather={patch.feather}
+          setPatchFeather={patch.setFeather}
+          patchToneMatch={patch.toneMatch}
+          setPatchToneMatch={patch.setToneMatch}
+          patchFlip={patch.flip}
+          setPatchFlip={patch.setFlip}
+          onApplyPatch={patch.apply}
+          onCancelPatch={patch.cancel}
           bgState={bgState}
           setBgState={(value) => {
             markDraftDirty();
