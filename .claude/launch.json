@@ -22,6 +22,18 @@
         "npm run build && npx vite preview --port 4173 --strictPort"
       ],
       "port": 4173
+    },
+    {
+      "name": "static",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "4180",
+        "--directory",
+        "dist"
+      ],
+      "port": 4180
     }
   ]
 }

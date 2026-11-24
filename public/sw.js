@@ -4,8 +4,11 @@
 // - AI background-removal model files (staticimgly.com): cache first, so the
 //   feature keeps working offline after it has been used once.
 // - Other same-origin files: stale-while-revalidate.
+// - Pages are served with cross-origin isolation headers (COOP/COEP), which
+//   static hosts such as GitHub Pages cannot set. That unlocks multi-threaded
+//   WebAssembly, making the AI cutout several times faster.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `chinhanh-shell-${VERSION}`;
 const ASSET_CACHE = `chinhanh-assets-${VERSION}`;
 const MODEL_CACHE = 'chinhanh-ai-models';
@@ -54,15 +57,23 @@ async function cacheFirst(request, cacheName) {
   return response;
 }
 
+function withIsolation(response) {
+  if (!response || response.type === 'opaque' || response.status === 0) return response;
+  const headers = new Headers(response.headers);
+  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 async function networkFirstShell(request) {
   const cache = await caches.open(SHELL_CACHE);
   try {
     const response = await fetch(request);
     if (response.ok) cache.put(SHELL_URL, response.clone());
-    return response;
+    return withIsolation(response);
   } catch (error) {
     const hit = await cache.match(SHELL_URL, MATCH);
-    if (hit) return hit;
+    if (hit) return withIsolation(hit);
     throw error;
   }
 }
